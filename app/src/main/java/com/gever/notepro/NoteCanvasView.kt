@@ -24,7 +24,9 @@ import androidx.ink.brush.StockBrushes
 import androidx.ink.geometry.ImmutableBox
 import androidx.ink.geometry.ImmutableVec
 import androidx.ink.rendering.android.canvas.CanvasStrokeRenderer
+import androidx.ink.strokes.MutableStrokeInputBatch
 import androidx.ink.strokes.Stroke
+import androidx.ink.strokes.StrokeInput
 import androidx.input.motionprediction.MotionEventPredictor
 import java.util.IdentityHashMap
 import kotlin.math.floor
@@ -39,6 +41,8 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
 
     enum class Tool { PEN, HIGHLIGHTER, ERASER }
     enum class Paper { LINED, GRID, DOTS, BLANK }
+    /** WHOLE removes touched strokes; PARTIAL cuts them, the remaining pieces stay normal strokes. */
+    enum class EraserMode { WHOLE, PARTIAL }
 
     companion object {
         const val PAGE_W = 1000f
@@ -59,7 +63,21 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     var fingerDraws = false
     var paper = Paper.LINED
         set(v) { field = v; layer.invalidate() }
+    var paperColor = Color.WHITE
+        set(v) { field = v; layer.invalidate() }
+    var eraserMode = EraserMode.WHOLE
+    /** Eraser radius in screen dp (independent of zoom). */
+    var eraserRadiusDp = 12f
+    /** Screen pixels kept free at the top for the floating toolbar when scrolled to the start. */
+    var topInset = 0f
+        set(v) { field = v; if (width > 0) clampAndApply() }
+    /** Screen pixels kept free on each side at the fit zoom (room for the side rail). */
+    var sideInset = 16f
     var onHistoryChanged: (() -> Unit)? = null
+    /** (current page, page count), 1-based. */
+    var onPageChanged: ((Int, Int) -> Unit)? = null
+    /** Called when an eraser stroke ends; true if it came from the eraser tool (not the pen button). */
+    var onEraseEnded: ((Boolean) -> Unit)? = null
 
     // ---- document ----
     private val strokes = mutableListOf<Stroke>()
@@ -68,7 +86,8 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
 
     private sealed class Act {
         class Add(val s: Stroke) : Act()
-        class Erase(val list: List<Pair<Stroke, Int>>) : Act()
+        /** An eraser pass: strokes removed (with their old index) and pieces added by the partial eraser. */
+        class Edit(val removed: List<Pair<Stroke, Int>>, val added: List<Stroke>) : Act()
     }
     private val undoS = ArrayDeque<Act>()
     private val redoS = ArrayDeque<Act>()
@@ -91,7 +110,9 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     private var penPointer = -1
     private var currentId: InProgressStrokeId? = null
     private var erasing = false
+    private var eraseFromTool = false
     private val erasedNow = mutableListOf<Pair<Stroke, Int>>()
+    private val addedNow = mutableListOf<Stroke>()
     private var gesturing = false
 
     // ---- diagnostics ----
@@ -134,7 +155,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         super.onSizeChanged(w, h, oldw, oldh)
         if (w == 0) return
         val worldTop = if (oldw == 0) 0f else (0f - ty) / s
-        val pageScreenW = min(w - 32 * d, 980 * d)
+        val pageScreenW = min(w - 2 * sideInset, 980 * d)
         fitScale = pageScreenW / PAGE_W
         s = fitScale
         tx = (w - PAGE_W * s) / 2f
@@ -146,9 +167,19 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         val w = width.toFloat(); val h = height.toFloat()
         val docW = PAGE_W * s; val docH = docHeight() * s; val pad = 16 * d
         tx = if (docW <= w) (w - docW) / 2f else tx.coerceIn(w - docW - pad, pad)
-        ty = if (docH <= h) 0f else ty.coerceIn(h - docH, 0f)
+        val avail = h - topInset
+        ty = if (docH <= avail) topInset else ty.coerceIn(h - docH, topInset)
         m.setScale(s, s); m.postTranslate(tx, ty); m.invert(inv)
         layer.invalidate()
+        reportPage()
+    }
+
+    private var lastReported = -1L
+    private fun reportPage() {
+        val centerWorld = (height / 2f - ty) / s
+        val cur = (floor((centerWorld - GAP / 2) / (PAGE_H + GAP)).toInt() + 1).coerceIn(1, pages)
+        val key = cur.toLong() shl 32 or pages.toLong()
+        if (key != lastReported) { lastReported = key; onPageChanged?.invoke(cur, pages) }
     }
 
     private fun toWorld(x: Float, y: Float): FloatArray = floatArrayOf(x, y).also { inv.mapPoints(it) }
@@ -195,9 +226,10 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         ink.requestUnbufferedDispatch(e)
         diagTool = toolName(type)
         strokeStart = e.eventTime; samples = 1
-        erasing = tool == Tool.ERASER || type == MotionEvent.TOOL_TYPE_ERASER ||
-            (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
-        if (erasing) { erasedNow.clear(); eraseAt(e.getX(idx), e.getY(idx)) }
+        val button = type == MotionEvent.TOOL_TYPE_ERASER || (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
+        erasing = tool == Tool.ERASER || button
+        eraseFromTool = tool == Tool.ERASER && !button
+        if (erasing) { erasedNow.clear(); addedNow.clear(); eraseAt(e.getX(idx), e.getY(idx)) }
         else { predictor.record(e); currentId = ink.startStroke(e, penPointer, brush(), Matrix(inv), identity) }
     }
 
@@ -230,8 +262,9 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
 
     private fun endPen(e: MotionEvent, canceled: Boolean) {
         if (erasing) {
-            if (erasedNow.isNotEmpty()) push(Act.Erase(erasedNow.toList()))
-            erasedNow.clear(); erasing = false
+            if (erasedNow.isNotEmpty() || addedNow.isNotEmpty()) push(Act.Edit(erasedNow.toList(), addedNow.toList()))
+            erasedNow.clear(); addedNow.clear(); erasing = false
+            onEraseEnded?.invoke(eraseFromTool)
         } else currentId?.let { id ->
             if (canceled) ink.cancelStroke(id, e) else { predictor.record(e); ink.finishStroke(e, penPointer, id) }
         }
@@ -305,16 +338,44 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
 
     private fun eraseAt(x: Float, y: Float) {
         val p = toWorld(x, y)
-        val r = 12f * d / s
+        val r = eraserRadiusDp * d / s
         val box = ImmutableBox.fromCenterAndDimensions(ImmutableVec(p[0], p[1]), 2 * r, 2 * r)
+        val partial = eraserMode == EraserMode.PARTIAL && eraseFromTool
         var changed = false
         for (k in strokes.indices.reversed()) {
             val st = strokes[k]
             val b = boundsOf(st)
             if (p[0] < b.left - r || p[0] > b.right + r || p[1] < b.top - r || p[1] > b.bottom + r) continue
-            if (st.shape.computeCoverageIsGreaterThan(box, 0f)) { erasedNow.add(st to k); strokes.removeAt(k); changed = true }
+            if (!st.shape.computeCoverageIsGreaterThan(box, 0f)) continue
+            val pieces = if (partial) cut(st, p[0], p[1], r) else emptyList()
+            if (partial && pieces.size == 1 && pieces[0] === st) continue   // no input point inside: nothing to cut
+            strokes.removeAt(k)
+            // A piece created earlier in this same pass just disappears; otherwise remember the original.
+            if (!addedNow.remove(st)) erasedNow.add(st to k)
+            for ((j, piece) in pieces.withIndex()) { strokes.add(k + j, piece); addedNow.add(piece) }
+            changed = true
         }
         if (changed) layer.invalidate()
+    }
+
+    /** Splits a stroke into the runs of input points that lie outside the eraser circle. */
+    private fun cut(st: Stroke, cx: Float, cy: Float, r: Float): List<Stroke> {
+        val inputs = st.inputs
+        val n = inputs.size
+        val pt = StrokeInput()
+        val runs = mutableListOf<MutableStrokeInputBatch>()
+        var cur: MutableStrokeInputBatch? = null
+        var removedAny = false
+        val r2 = r * r
+        for (i in 0 until n) {
+            inputs.populate(i, pt)
+            val dx = pt.x - cx; val dy = pt.y - cy
+            if (dx * dx + dy * dy <= r2) { removedAny = true; cur = null; continue }
+            val batch = cur ?: MutableStrokeInputBatch().also { runs.add(it); cur = it }
+            batch.add(pt)
+        }
+        if (!removedAny) return listOf(st)
+        return runs.filter { it.size >= 2 }.map { Stroke(st.brush, it.toImmutable()) }
     }
 
     private fun push(a: Act) { undoS.addLast(a); redoS.clear(); onHistoryChanged?.invoke() }
@@ -323,7 +384,10 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         val a = undoS.removeLastOrNull() ?: return
         when (a) {
             is Act.Add -> strokes.remove(a.s)
-            is Act.Erase -> for (p in a.list.asReversed()) strokes.add(p.second.coerceAtMost(strokes.size), p.first)
+            is Act.Edit -> {
+                for (s in a.added) strokes.remove(s)
+                for (p in a.removed.asReversed()) strokes.add(p.second.coerceAtMost(strokes.size), p.first)
+            }
         }
         redoS.addLast(a); layer.invalidate(); onHistoryChanged?.invoke()
     }
@@ -332,7 +396,10 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         val a = redoS.removeLastOrNull() ?: return
         when (a) {
             is Act.Add -> strokes.add(a.s)
-            is Act.Erase -> for (p in a.list) strokes.remove(p.first)
+            is Act.Edit -> {
+                for (p in a.removed) strokes.remove(p.first)
+                strokes.addAll(a.added)
+            }
         }
         undoS.addLast(a); layer.invalidate(); onHistoryChanged?.invoke()
     }
@@ -340,7 +407,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     // ================= drawing =================
     private inner class PaperLayer(ctx: Context) : View(ctx) {
         private val renderer = CanvasStrokeRenderer.create()
-        private val pagePaint = Paint().apply { color = Color.WHITE }
+        private val pagePaint = Paint()
         private val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0x1A000000 }
         private val rulePaint = Paint().apply { color = 0xFFD5E1F2.toInt(); strokeWidth = 1.4f }
         private val gridPaint = Paint().apply { color = 0xFFE1E6EE.toInt(); strokeWidth = 1.2f }
@@ -351,6 +418,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
             val visTop = (0f - ty) / s; val visBottom = (height - ty) / s
             val visLeft = (0f - tx) / s; val visRight = (width - tx) / s
             c.save(); c.concat(m)
+            pagePaint.color = paperColor
             for (i in 0 until pages) {
                 val top = pageTop(i)
                 if (top > visBottom || top + PAGE_H < visTop) continue

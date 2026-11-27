@@ -18,6 +18,12 @@ The owner is a chemistry undergraduate; the app is mainly for lecture notes and 
   S Pen side button (BUTTON_STYLUS_PRIMARY) = stroke eraser.
 - UI language: Hebrew, RTL. minSdk 29, target/compile 36, arm64-v8a only.
 - **Repo is public.** Never commit secrets: keystore, passwords, tokens, API keys.
+- Editor layout (owner, 2026-11-27): floating one-row tool pill at the top centre (tap the selected tool
+  again for its style tray); back + title float in the top start corner; action rail (undo/redo/paper/⋯)
+  on the **left** screen edge (maybe movable later, not now). S Pen side button stays = eraser while held
+  (no radial quick-tools menu). See docs/design-research.md.
+- Pace (owner): get to a polished, Notability-like app fast, then improve. Breadth of UI first
+  (settings, themes, stickers, clips…), polish later.
 - Sync plan (later stage): small metadata in Firebase (free Spark plan), heavy files (PDF, audio)
   in the owner's **Google Drive** — Cloud Storage for Firebase now requires the paid Blaze plan.
 
@@ -46,6 +52,10 @@ Then `./gradlew assembleDebug`. Maven Central sometimes answers 429 through the 
 There is no emulator: the owner tests on the tablet, so describe what to check after each release.
 Docs-only commits: add `[skip ci]` to the commit message so no empty release is published.
 
+On the owner's Windows PC: JDK 17 and the Android SDK are portable in `%LOCALAPPDATA%\NoteProBuild`
+(`jdk`, `sdk`). Gradle there needs TEMP/TMP pointed at a short path (e.g. `C:\nptmp`), or it fails with
+"Unable to establish loopback connection".
+
 ## Roadmap (agreed order; adjust with the owner)
 1. ~~Writing canvas test~~ — done (pen, pressure, prediction, palm rejection, stroke eraser, undo/redo).
 2. ~~Pages~~ — first version done: continuous vertical pages (A4 ratio, world units 1000x1414), finger scroll/fling,
@@ -59,8 +69,12 @@ Docs-only commits: add `[skip ci]` to the commit message so no empty release is 
 7. Cloud sync across devices.
 
 ## Code map
-- `MainActivity.kt` — editor screen: top bar (title, update chip, ⋯ menu), tool bar (tools, colours, widths, undo/redo, paper).
-- `NoteCanvasView.kt` — pages, view transform (world↔screen), pen vs finger input, eraser, undo/redo, rendering.
+- `MainActivity.kt` — editor screen: floating tool pill + style tray (5 colour slots per tool, full palette
+  popover, 3 widths; eraser sizes + Whole/Partial), title, left rail, page counter, ⋮ menu.
+- `PaperDialog.kt` — centred template dialog (paper type thumbnails + paper colours, Cancel/Save).
+- `Theme.kt` — NotePro's colours and the colour palettes.
+- `NoteCanvasView.kt` — pages, view transform (world↔screen), pen vs finger input, whole/partial eraser,
+  undo/redo, rendering, page counter callback.
   Known perf TODO: every frame redraws all visible strokes; add per-page bitmap caching when notes get long.
 - NOTHING IS SAVED YET — next stage is the library (subjects → notebooks) plus saving.
 - `Updater.kt` — GitHub release check + PackageInstaller update flow.
