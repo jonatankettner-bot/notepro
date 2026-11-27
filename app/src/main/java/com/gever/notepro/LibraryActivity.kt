@@ -109,9 +109,7 @@ class LibraryActivity : Activity() {
         })
         sideList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         col.addView(ScrollView(this).apply { addView(sideList) }, LinearLayout.LayoutParams(-1, 0, 1f))
-        col.addView(navRow("הגדרות", null, false) {
-            Toast.makeText(this, "מסך ההגדרות מגיע בשלב הבא", Toast.LENGTH_SHORT).show()
-        })
+        col.addView(navRow("הגדרות", null, false) { startActivity(Intent(this, SettingsActivity::class.java)) })
         return col
     }
 
@@ -287,8 +285,8 @@ class LibraryActivity : Activity() {
         pm.menu.add(0, 1, 0, "הערה חדשה"); pm.menu.add(0, 2, 1, "הערה חדשה מתבנית…"); pm.menu.add(0, 3, 2, "ייבוא PDF")
         pm.setOnMenuItemClickListener {
             when (it.itemId) {
-                1 -> open(store.create(defaultTitle(), currentFolder()))
-                2 -> PaperDialog(this, NoteCanvasView.Paper.LINED, -1) { p, c ->
+                1 -> { val pr = Prefs(this); open(store.create(defaultTitle(), currentFolder(), pr.defaultPaper, pr.defaultPaperColor)) }
+                2 -> PaperDialog(this, NoteCanvasView.Paper.LINED, Color.WHITE) { p, c ->
                     open(store.create(defaultTitle(), currentFolder(), p.name, c)) }.show()
                 3 -> Toast.makeText(this, "ייבוא PDF מגיע בשלב הבא", Toast.LENGTH_SHORT).show()
             }

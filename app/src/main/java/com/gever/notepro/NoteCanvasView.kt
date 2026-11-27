@@ -256,6 +256,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                 return true
             }
             if (penPointer != -1) { diagBlocked++; return true }   // palm while writing
+            if (!gesturing) { tapStart = e.eventTime; tapMaxPointers = 0; tapMoved = false; tapX = e.getX(idx); tapY = e.getY(idx) }
             gesturing = true
             scroller.forceFinished(true)
         }
@@ -263,12 +264,24 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         if (penPointer != -1) { penEvent(e); return true }
 
         if (gesturing) {
+            tapMaxPointers = maxOf(tapMaxPointers, e.pointerCount)
+            if (action == MotionEvent.ACTION_MOVE && kotlin.math.hypot(e.getX(0) - tapX, e.getY(0) - tapY) > 18 * d) tapMoved = true
             scaleDetector.onTouchEvent(e)
             gestureDetector.onTouchEvent(e)
-            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) gesturing = false
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                gesturing = false
+                if (action == MotionEvent.ACTION_UP && tapGestures && !tapMoved && e.eventTime - tapStart < 350) {
+                    if (tapMaxPointers == 2) undo() else if (tapMaxPointers == 3) redo()
+                }
+            }
         }
         return true
     }
+
+    /** Two-finger tap = undo, three-finger tap = redo. */
+    var tapGestures = true
+    private var tapStart = 0L; private var tapMaxPointers = 0; private var tapMoved = false
+    private var tapX = 0f; private var tapY = 0f
 
     private fun startPen(e: MotionEvent, idx: Int, type: Int) {
         penPointer = e.getPointerId(idx)

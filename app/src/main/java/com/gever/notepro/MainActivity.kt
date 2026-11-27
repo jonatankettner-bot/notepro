@@ -192,7 +192,15 @@ class MainActivity : Activity() {
         ui.post(object : Runnable { override fun run() { renderDiag(); ui.postDelayed(this, 150) } })
     }
 
-    override fun onResume() { super.onResume(); checkForUpdate(manual = false) }
+    override fun onResume() {
+        super.onResume()
+        val p = Prefs(this)
+        canvas.usePressure = p.usePressure; canvas.usePrediction = p.usePrediction; canvas.fingerDraws = p.fingerDraws
+        canvas.snapLines = p.snapLines; canvas.tapGestures = p.tapGestures; autoDeselectEraser = p.autoDeselectEraser
+        if (p.keepScreenOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        checkForUpdate(manual = false)
+    }
 
     override fun onPause() { super.onPause(); save() }
 
