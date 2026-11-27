@@ -1,412 +1,301 @@
-@file:OptIn(androidx.ink.authoring.ExperimentalLatencyDataApi::class)
-
 package com.gever.notepro
 
 import android.app.Activity
-import android.content.Context
+import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
-import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
+import android.widget.ImageButton
 import android.widget.LinearLayout
-import android.widget.SeekBar
+import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import androidx.ink.authoring.InProgressStrokeId
-import androidx.ink.authoring.InProgressStrokesFinishedListener
-import androidx.ink.authoring.InProgressStrokesView
-import androidx.ink.authoring.latency.LatencyData
-import androidx.ink.authoring.latency.LatencyDataCallback
-import androidx.ink.brush.Brush
-import androidx.ink.brush.StockBrushes
-import androidx.ink.geometry.ImmutableBox
-import androidx.ink.geometry.ImmutableVec
-import androidx.ink.rendering.android.canvas.CanvasStrokeRenderer
-import androidx.ink.strokes.Stroke
-import androidx.input.motionprediction.MotionEventPredictor
 
-private const val BAR = 0xFF1D3461.toInt()
-private const val BTN = 0xFF2B4A80.toInt()
-private const val ON = 0xFFFFD24A.toInt()
+private const val ACCENT = 0xFF2B59C3.toInt()       // selection / highlights
+private const val ACCENT_SOFT = 0xFFE6EDFB.toInt()  // selected-tool background
+private const val ICON = 0xFF3A3F4B.toInt()
+private const val BAR = 0xFFFFFFFF.toInt()
+private const val TOOLBAR = 0xFFFAFBFD.toInt()
+private const val LINE = 0xFFE3E6EB.toInt()
 
-/** The lined notebook page plus every finished stroke. */
-class PaperView(ctx: Context) : View(ctx) {
-    val strokes = mutableListOf<Stroke>()
-    private val renderer = CanvasStrokeRenderer.create()
-    private val identity = Matrix()
-    private val d = resources.displayMetrics.density
-    private val linePaint = Paint().apply { color = 0xFFC9D8EF.toInt(); strokeWidth = d }
-    private val marginPaint = Paint().apply { color = 0xFFEFA0A0.toInt(); strokeWidth = 1.2f * d }
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = 0xFF9AA6B8.toInt(); textSize = 14f * d; textAlign = Paint.Align.RIGHT
-    }
+private val PEN_COLORS = intArrayOf(
+    0xFF1F1F24.toInt(), 0xFF2155D6.toInt(), 0xFFD62F2F.toInt(), 0xFF178A43.toInt(), 0xFF7B3FE4.toInt(), 0xFFE07A10.toInt())
+private val HL_COLORS = intArrayOf(0x66FFE14D, 0x668BE38B, 0x66FF8FC2, 0x667FC8FF, 0x66FFB36B)
+private val PEN_SIZES = floatArrayOf(2.4f, 4f, 6.5f)
+private val HL_SIZES = floatArrayOf(18f, 28f, 40f)
 
-    override fun onDraw(c: Canvas) {
-        c.drawColor(0xFFFDFDFB.toInt())
-        val top = 72f * d
-        var y = top
-        while (y < height) { c.drawLine(0f, y, width.toFloat(), y, linePaint); y += 34f * d }
-        val mx = width - 64f * d
-        c.drawLine(mx, 0f, mx, height.toFloat(), marginPaint)
-        c.drawText("NotePro · דף טיוטה", mx - 12f * d, top - 16f * d, textPaint)
-        for (s in strokes) renderer.draw(c, s, identity)
-    }
-}
-
+/** Note editor: top bar (title, actions) + tool bar + the page canvas. */
 class MainActivity : Activity() {
-    private enum class Mode { PEN, ERASER }
-    private sealed class Act {
-        class Add(val s: Stroke) : Act()
-        class Erase(val list: List<Pair<Stroke, Int>>) : Act()
-        class Clear(val list: List<Stroke>) : Act()
-    }
-
-    private lateinit var ips: InProgressStrokesView
-    private lateinit var paper: PaperView
+    private lateinit var canvas: NoteCanvasView
     private lateinit var diag: TextView
-    private lateinit var predictor: MotionEventPredictor
+    private lateinit var updateChip: TextView
     private val d by lazy { resources.displayMetrics.density }
     private val ui = Handler(Looper.getMainLooper())
 
-    // settings
-    private var mode = Mode.PEN
-    private var color = 0xFF1B1C20.toInt()
-    private var sizePx = 7f
-    private var usePressure = true
-    private var usePrediction = true
-    private var fingerDraws = false
+    private val toolBtns = mutableMapOf<NoteCanvasView.Tool, ImageButton>()
+    private lateinit var colorRow: LinearLayout
+    private lateinit var sizeRow: LinearLayout
+    private lateinit var undoBtn: ImageButton
+    private lateinit var redoBtn: ImageButton
     private var showDiag = false
-
-    // stroke state
-    private var activePointer = -1
-    private var currentId: InProgressStrokeId? = null
-    private var erasing = false
-    private val erasedNow = mutableListOf<Pair<Stroke, Int>>()
-    private val undoS = ArrayDeque<Act>()
-    private val redoS = ArrayDeque<Act>()
-
-    // diagnostics
-    private var dType = "—"; private var dPressure = "—"; private var dTilt = "—"; private var dButtons = "—"
-    private var strokeStart = 0L; private var samples = 0; private var hz = 0
-    @Volatile private var latMs = 0.0
-    private var latencySupported = false
-    private var blocked = 0
-
-    // toolbar views that change state
-    private lateinit var penBtn: Button; private lateinit var eraserBtn: Button
-    private lateinit var pressureBtn: Button; private lateinit var predictBtn: Button
-    private lateinit var fingerBtn: Button; private lateinit var diagBtn: Button
-    private lateinit var undoBtn: Button; private lateinit var redoBtn: Button; private lateinit var clearBtn: Button
-    private val swatches = mutableListOf<Pair<View, Int>>()
-    private lateinit var updateBtn: Button
     private var pending: Updater.Release? = null
 
     private fun dp(v: Int) = (v * d).toInt()
-    private fun round(c: Int, r: Float = 10f) = GradientDrawable().apply { setColor(c); cornerRadius = r * d }
+    private fun rounded(c: Int, r: Float) = GradientDrawable().apply { setColor(c); cornerRadius = r * d }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(0xFFDFE5EE.toInt()) }
-        root.addView(buildToolbar(), LinearLayout.LayoutParams(-1, dp(60)))
+        canvas = NoteCanvasView(this)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; layoutDirection = View.LAYOUT_DIRECTION_RTL
+            setBackgroundColor(BAR)
+        }
+        root.addView(topBar(), LinearLayout.LayoutParams(-1, dp(54)))
+        root.addView(toolBar(), LinearLayout.LayoutParams(-1, dp(58)))
+        root.addView(View(this).apply { setBackgroundColor(LINE) }, LinearLayout.LayoutParams(-1, 1))
 
         val host = FrameLayout(this)
-        paper = PaperView(this)
-        ips = InProgressStrokesView(this)
+        host.addView(canvas, FrameLayout.LayoutParams(-1, -1))
         diag = TextView(this).apply {
-            setTextColor(Color.WHITE); textSize = 13f; background = round(0xE6101A2E.toInt(), 12f)
-            setPadding(dp(14), dp(10), dp(14), dp(10)); textDirection = View.TEXT_DIRECTION_RTL
+            setTextColor(Color.WHITE); textSize = 12f; background = rounded(0xE6101A2E.toInt(), 10f)
+            setPadding(dp(12), dp(8), dp(12), dp(8)); visibility = View.GONE
         }
-        host.addView(paper, FrameLayout.LayoutParams(-1, -1))
-        host.addView(ips, FrameLayout.LayoutParams(-1, -1))
         host.addView(diag, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.LEFT).apply { setMargins(dp(12), dp(12), dp(12), dp(12)) })
-        root.addView(host, LinearLayout.LayoutParams(-1, 0, 1f).apply { setMargins(dp(10), dp(10), dp(10), dp(10)) })
+        root.addView(host, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
+        // Android 15+ draws apps edge-to-edge: keep the bars below the status bar.
+        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.displayCutout())
+            v.setPadding(bars.left, bars.top, bars.right, 0); insets
+        }
 
         WindowCompat.getInsetsController(window, window.decorView).apply {
-            hide(WindowInsetsCompat.Type.systemBars())
+            hide(WindowInsetsCompat.Type.navigationBars())
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            isAppearanceLightStatusBars = true
         }
 
-        predictor = MotionEventPredictor.newInstance(ips)
-        ips.addFinishedStrokesListener(object : InProgressStrokesFinishedListener {
-            override fun onStrokesFinished(strokes: Map<InProgressStrokeId, Stroke>) {
-                for (s in strokes.values) { paper.strokes.add(s); push(Act.Add(s)) }
-                paper.invalidate()
-                ips.removeFinishedStrokes(strokes.keys)
-            }
+        canvas.onHistoryChanged = { refreshHistory() }
+        refresh()
+        ui.post(object : Runnable { override fun run() { renderDiag(); ui.postDelayed(this, 150) } })
+    }
+
+    override fun onResume() { super.onResume(); checkForUpdate(manual = false) }
+
+    // ================= top bar =================
+    private fun icon(res: Int, desc: String, onClick: () -> Unit) = ImageButton(this).apply {
+        setImageResource(res); contentDescription = desc
+        imageTintList = ColorStateList.valueOf(ICON)
+        background = rounded(Color.TRANSPARENT, 10f)
+        scaleType = android.widget.ImageView.ScaleType.CENTER
+        setOnClickListener { onClick() }
+        layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply { marginStart = dp(4) }
+    }
+
+    private fun topBar(): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), 0, dp(8), 0); setBackgroundColor(BAR)
+        }
+        row.addView(icon(R.drawable.ic_arrow_forward_ios, "ספרייה") {
+            Toast.makeText(this, "הספרייה (נושאים ומחברות) מגיעה בשלב הבא", Toast.LENGTH_SHORT).show()
         })
-        val latencyCb = object : LatencyDataCallback {
-            override fun onLatencyData(data: LatencyData) {
-                val ms = (data.estimatedPixelPresentationTime - data.osDetectsEvent) / 1e6
-                if (ms > 0 && ms < 500) latMs = if (latMs == 0.0) ms else latMs * 0.95 + ms * 0.05
+        row.addView(TextView(this).apply {
+            text = "הערה חדשה"; textSize = 18f; setTextColor(0xFF1C1F26.toInt())
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setPadding(dp(6), 0, dp(6), 0)
+        })
+        row.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        updateChip = TextView(this).apply {
+            textSize = 14f; setTextColor(Color.WHITE); background = rounded(ACCENT, 18f)
+            setPadding(dp(14), dp(7), dp(14), dp(7)); visibility = View.GONE
+            setOnClickListener { installUpdate() }
+        }
+        row.addView(updateChip)
+        val more = icon(R.drawable.ic_more_horiz, "עוד") {}
+        more.setOnClickListener { showMoreMenu(more) }
+        row.addView(more)
+        return row
+    }
+
+    private fun showMoreMenu(anchor: View) {
+        val pm = PopupMenu(this, anchor)
+        val menu = pm.menu
+        menu.add(0, 1, 0, "בדוק עדכון")
+        menu.add(0, 2, 1, "נתוני עט").setCheckable(true).isChecked = showDiag
+        menu.add(0, 3, 2, "לחץ עט").setCheckable(true).isChecked = canvas.usePressure
+        menu.add(0, 4, 3, "חיזוי תנועה").setCheckable(true).isChecked = canvas.usePrediction
+        menu.add(0, 5, 4, "אצבע כותבת").setCheckable(true).isChecked = canvas.fingerDraws
+        menu.add(0, 6, 5, "גרסה " + BuildConfig.VERSION_CODE).isEnabled = false
+        pm.setOnMenuItemClickListener {
+            when (it.itemId) {
+                1 -> checkForUpdate(manual = true)
+                2 -> { showDiag = !showDiag; renderDiag() }
+                3 -> canvas.usePressure = !canvas.usePressure
+                4 -> canvas.usePrediction = !canvas.usePrediction
+                5 -> canvas.fingerDraws = !canvas.fingerDraws
             }
+            true
         }
-        // The latency hook is not exposed to Kotlin in Ink 1.0.0, so it is set through reflection; if that fails the app still works.
-        latencySupported = try {
-            InProgressStrokesView::class.java.getMethod("setLatencyDataCallback", LatencyDataCallback::class.java).invoke(ips, latencyCb); true
-        } catch (t: Throwable) { false }
-        ips.setOnTouchListener { v, e -> onTouch(v, e) }
-        ips.setOnGenericMotionListener { _, e ->
-            if (e.actionMasked == MotionEvent.ACTION_HOVER_MOVE) note(e, 0, hover = true)
-            false
-        }
-        refreshUi()
-        ui.post(object : Runnable { override fun run() { renderDiag(); ui.postDelayed(this, 120) } })
+        pm.show()
     }
 
-    // ---------- input ----------
-    private fun allowed(tool: Int) = tool == MotionEvent.TOOL_TYPE_STYLUS || tool == MotionEvent.TOOL_TYPE_ERASER ||
-        tool == MotionEvent.TOOL_TYPE_MOUSE || (tool == MotionEvent.TOOL_TYPE_FINGER && fingerDraws)
+    // ================= tool bar =================
+    private fun divider() = View(this).apply {
+        setBackgroundColor(LINE)
+        layoutParams = LinearLayout.LayoutParams(1, dp(28)).apply { marginStart = dp(12); marginEnd = dp(8) }
+    }
 
-    private fun brush(): Brush = Brush.createWithColorIntArgb(
-        if (usePressure) StockBrushes.pressurePen() else StockBrushes.marker(), color, sizePx, 0.1f)
-
-    private fun onTouch(v: View, e: MotionEvent): Boolean {
-        when (e.actionMasked) {
-            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
-                val idx = e.actionIndex
-                val tool = e.getToolType(idx)
-                note(e, idx, hover = false)
-                if (!allowed(tool)) { if (tool == MotionEvent.TOOL_TYPE_FINGER) blocked++; return true }
-                if (activePointer != -1) return true
-                activePointer = e.getPointerId(idx)
-                v.requestUnbufferedDispatch(e)
-                strokeStart = e.eventTime; samples = 1
-                erasing = mode == Mode.ERASER || tool == MotionEvent.TOOL_TYPE_ERASER ||
-                    (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
-                if (erasing) { erasedNow.clear(); eraseAt(e.getX(idx), e.getY(idx)) }
-                else { predictor.record(e); currentId = ips.startStroke(e, activePointer, brush()) }
-            }
-            MotionEvent.ACTION_MOVE -> {
-                if (activePointer == -1) return true
-                val idx = e.findPointerIndex(activePointer)
-                if (idx < 0) return true
-                note(e, idx, hover = false)
-                samples += e.historySize + 1
-                val dt = e.eventTime - strokeStart
-                if (dt > 80) hz = (samples * 1000L / dt).toInt()
-                if (erasing) {
-                    for (h in 0 until e.historySize) eraseAt(e.getHistoricalX(idx, h), e.getHistoricalY(idx, h))
-                    eraseAt(e.getX(idx), e.getY(idx))
-                } else {
-                    val id = currentId ?: return true
-                    predictor.record(e)
-                    val predicted = if (usePrediction) predictor.predict() else null
-                    try { ips.addToStroke(e, activePointer, id, predicted) } finally { predicted?.recycle() }
-                }
-            }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
-                if (e.getPointerId(e.actionIndex) != activePointer) return true
-                endStroke(e, canceled = (e.flags and MotionEvent.FLAG_CANCELED) != 0)
-            }
-            MotionEvent.ACTION_CANCEL -> if (activePointer != -1) endStroke(e, canceled = true)
+    private fun toolBar(): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
+            setPadding(dp(12), 0, dp(12), 0)
         }
-        return true
+        for ((t, res, name) in listOf(
+            Triple(NoteCanvasView.Tool.PEN, R.drawable.ic_edit, "עט"),
+            Triple(NoteCanvasView.Tool.HIGHLIGHTER, R.drawable.ic_ink_highlighter, "מרקר"),
+            Triple(NoteCanvasView.Tool.ERASER, R.drawable.ic_ink_eraser, "מחק"))) {
+            val b = icon(res, name) { canvas.tool = t; refresh() }
+            toolBtns[t] = b; row.addView(b)
+        }
+        row.addView(divider())
+        colorRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        row.addView(colorRow)
+        row.addView(divider())
+        sizeRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        row.addView(sizeRow)
+        row.addView(divider())
+        undoBtn = icon(R.drawable.ic_undo, "ביטול") { canvas.undo() }
+        redoBtn = icon(R.drawable.ic_redo, "חזרה") { canvas.redo() }
+        row.addView(undoBtn); row.addView(redoBtn)
+        row.addView(divider())
+        val paperBtn = icon(R.drawable.ic_grid_on, "סוג נייר") {}
+        paperBtn.setOnClickListener { showPaperMenu(paperBtn) }
+        row.addView(paperBtn)
+
+        return HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false; isFillViewport = true; setBackgroundColor(TOOLBAR)
+            addView(row, FrameLayout.LayoutParams(-1, -1))
+        }
     }
 
-    private fun endStroke(e: MotionEvent, canceled: Boolean) {
-        if (erasing) {
-            if (erasedNow.isNotEmpty()) push(Act.Erase(erasedNow.toList()))
-            erasedNow.clear(); erasing = false
-        } else currentId?.let { id ->
-            if (canceled) ips.cancelStroke(id, e) else { predictor.record(e); ips.finishStroke(e, activePointer, id) }
-        }
-        currentId = null; activePointer = -1
+    private fun showPaperMenu(anchor: View) {
+        val pm = PopupMenu(this, anchor)
+        val names = listOf("שורות" to NoteCanvasView.Paper.LINED, "משבצות" to NoteCanvasView.Paper.GRID,
+            "נקודות" to NoteCanvasView.Paper.DOTS, "ריק" to NoteCanvasView.Paper.BLANK)
+        names.forEachIndexed { i, (label, _) -> pm.menu.add(1, i, i, label) }
+        pm.menu.setGroupCheckable(1, true, true)
+        names.forEachIndexed { i, (_, p) -> pm.menu.getItem(i).isChecked = canvas.paper == p }
+        pm.setOnMenuItemClickListener { canvas.paper = names[it.itemId].second; true }
+        pm.show()
     }
 
-    private fun eraseAt(x: Float, y: Float) {
-        val r = 12f * d
-        val box = ImmutableBox.fromCenterAndDimensions(ImmutableVec(x, y), 2 * r, 2 * r)
-        var changed = false
-        for (k in paper.strokes.indices.reversed()) {
-            val s = paper.strokes[k]
-            if (s.shape.computeCoverageIsGreaterThan(box, 0f)) { erasedNow.add(s to k); paper.strokes.removeAt(k); changed = true }
+    /** A round colour swatch; ring when selected. */
+    private inner class Swatch(val color: Int, val selected: Boolean) : View(this@MainActivity) {
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color or 0xFF000000.toInt() }
+        private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 2.5f * d; this.color = ACCENT }
+        override fun onDraw(c: Canvas) {
+            val cx = width / 2f; val cy = height / 2f
+            c.drawCircle(cx, cy, 11 * d, fill)
+            if (selected) c.drawCircle(cx, cy, 15.5f * d, ring)
         }
-        if (changed) paper.invalidate()
     }
 
-    // ---------- undo / redo ----------
-    private fun push(a: Act) { undoS.addLast(a); redoS.clear(); refreshUi() }
-    private fun undo() {
-        val a = undoS.removeLastOrNull() ?: return
-        when (a) {
-            is Act.Add -> paper.strokes.remove(a.s)
-            is Act.Erase -> for (p in a.list.asReversed()) paper.strokes.add(p.second.coerceAtMost(paper.strokes.size), p.first)
-            is Act.Clear -> { paper.strokes.clear(); paper.strokes.addAll(a.list) }
+    /** A width preset: dot of increasing size; soft background when selected. */
+    private inner class SizeDot(val radiusDp: Float, val selected: Boolean, val color: Int) : View(this@MainActivity) {
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color or 0xFF000000.toInt() }
+        private val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = ACCENT_SOFT }
+        override fun onDraw(c: Canvas) {
+            val cx = width / 2f; val cy = height / 2f
+            if (selected) c.drawCircle(cx, cy, 18 * d, bg)
+            c.drawCircle(cx, cy, radiusDp * d, fill)
         }
-        redoS.addLast(a); paper.invalidate(); refreshUi()
-    }
-    private fun redo() {
-        val a = redoS.removeLastOrNull() ?: return
-        when (a) {
-            is Act.Add -> paper.strokes.add(a.s)
-            is Act.Erase -> for (p in a.list) paper.strokes.remove(p.first)
-            is Act.Clear -> paper.strokes.clear()
-        }
-        undoS.addLast(a); paper.invalidate(); refreshUi()
-    }
-    private fun clearAll() {
-        if (paper.strokes.isEmpty()) return
-        undoS.addLast(Act.Clear(paper.strokes.toList())); redoS.clear()
-        paper.strokes.clear(); paper.invalidate(); refreshUi()
     }
 
-    // ---------- diagnostics ----------
-    private fun toolName(t: Int) = when (t) {
-        MotionEvent.TOOL_TYPE_STYLUS -> "עט"
-        MotionEvent.TOOL_TYPE_ERASER -> "קצה מחק"
-        MotionEvent.TOOL_TYPE_FINGER -> "אצבע"
-        MotionEvent.TOOL_TYPE_MOUSE -> "עכבר"
-        else -> "לא ידוע"
+    private fun rebuildPalette() {
+        colorRow.removeAllViews(); sizeRow.removeAllViews()
+        val tool = canvas.tool
+        if (tool == NoteCanvasView.Tool.ERASER) {
+            colorRow.addView(TextView(this).apply { text = "מחק קווים שלמים · גם בכפתור הצד של העט"; textSize = 13f; setTextColor(0xFF6B7280.toInt()) })
+            return
+        }
+        val hl = tool == NoteCanvasView.Tool.HIGHLIGHTER
+        val colors = if (hl) HL_COLORS else PEN_COLORS
+        val current = if (hl) canvas.hlColor else canvas.penColor
+        for (c in colors) colorRow.addView(Swatch(c, c == current).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(40), dp(44))
+            setOnClickListener { if (hl) canvas.hlColor = c else canvas.penColor = c; refresh() }
+        })
+        val sizes = if (hl) HL_SIZES else PEN_SIZES
+        val curSize = if (hl) canvas.hlSize else canvas.penSize
+        sizes.forEachIndexed { i, sz ->
+            sizeRow.addView(SizeDot(floatArrayOf(3f, 5f, 8f)[i], sz == curSize, current).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(42), dp(44))
+                setOnClickListener { if (hl) canvas.hlSize = sz else canvas.penSize = sz; refresh() }
+            })
+        }
     }
-    private fun note(e: MotionEvent, idx: Int, hover: Boolean) {
-        dType = toolName(e.getToolType(idx)) + if (hover) " (ריחוף)" else ""
-        dPressure = "%.3f".format(e.getPressure(idx))
-        dTilt = "%.0f°".format(Math.toDegrees(e.getAxisValue(MotionEvent.AXIS_TILT, idx).toDouble()))
-        val side = (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
-        dButtons = (if (side) "לחוץ" else "לא") + "  (buttonState=" + e.buttonState + ")"
+
+    private fun refresh() {
+        for ((t, b) in toolBtns) {
+            val on = t == canvas.tool
+            b.background = rounded(if (on) ACCENT_SOFT else Color.TRANSPARENT, 10f)
+            b.imageTintList = ColorStateList.valueOf(if (on) ACCENT else ICON)
+        }
+        refreshHistory()
+        rebuildPalette()
     }
+
+    private fun refreshHistory() {
+        undoBtn.isEnabled = canvas.canUndo; undoBtn.alpha = if (canvas.canUndo) 1f else 0.3f
+        redoBtn.isEnabled = canvas.canRedo; redoBtn.alpha = if (canvas.canRedo) 1f else 0.3f
+    }
+
     private fun renderDiag() {
         diag.visibility = if (showDiag) View.VISIBLE else View.GONE
         if (!showDiag) return
-        val refresh = display?.refreshRate?.toInt() ?: 0
+        val refreshHz = display?.refreshRate?.toInt() ?: 0
         diag.text = buildString {
-            appendLine("סוג קלט: $dType")
-            appendLine("לחץ: $dPressure")
-            appendLine("הטיה: $dTilt")
-            appendLine("כפתור צד: $dButtons")
-            appendLine("קצב דגימה: " + if (hz > 0) "$hz Hz" else "—")
-            appendLine("השהיה מוערכת (מגע עד פיקסל): " + when { latMs > 0 -> "%.1f ms".format(latMs); latencySupported -> "—"; else -> "לא זמין" })
-            appendLine("רענון מסך: $refresh Hz")
-            append("מגעי יד שנחסמו: $blocked")
+            appendLine("קלט: " + canvas.diagTool + "   לחץ: " + "%.2f".format(canvas.diagPressure))
+            appendLine("דגימה: " + (if (canvas.diagHz > 0) "${canvas.diagHz} Hz" else "—") + "   מסך: $refreshHz Hz")
+            append("השהיה מוערכת: " + (if (canvas.diagLatencyMs > 0) "%.1f ms".format(canvas.diagLatencyMs) else "—") +
+                "   מגעי יד שנחסמו: " + canvas.diagBlocked)
         }
     }
 
-    // ---------- updates ----------
+    // ================= updates =================
     private fun checkForUpdate(manual: Boolean) {
-        updateBtn.text = "בודק…"
         Updater.check { rel ->
             pending = rel
             if (rel != null) {
-                updateBtn.text = "עדכון זמין: גרסה " + rel.versionCode
-                style(updateBtn, true)
+                updateChip.text = "עדכון זמין · גרסה " + rel.versionCode
+                updateChip.visibility = View.VISIBLE
             } else {
-                updateBtn.text = "בדוק עדכון"
-                style(updateBtn, false)
-                if (manual) Toast.makeText(this, "יש לך את הגרסה האחרונה", Toast.LENGTH_SHORT).show()
+                updateChip.visibility = View.GONE
+                if (manual) Toast.makeText(this, "יש לך את הגרסה האחרונה (" + BuildConfig.VERSION_CODE + ")", Toast.LENGTH_SHORT).show()
             }
         }
     }
-    private fun onUpdateClick() {
-        val rel = pending
-        if (rel == null) { checkForUpdate(manual = true); return }
-        Updater.install(this, rel) { msg -> updateBtn.text = msg }
+
+    private fun installUpdate() {
+        val rel = pending ?: return
+        Updater.install(this, rel) { msg -> updateChip.text = msg }
     }
 
-    override fun onResume() {
-        super.onResume()
-        if (::updateBtn.isInitialized) checkForUpdate(manual = false)
-    }
-
-    // ---------- toolbar ----------
-    private fun btn(text: String, onClick: () -> Unit) = Button(this).apply {
-        this.text = text; isAllCaps = false; textSize = 15f; setTextColor(Color.WHITE)
-        background = round(BTN); stateListAnimator = null
-        minWidth = dp(48); minimumWidth = dp(48); minHeight = 0; minimumHeight = 0
-        setPadding(dp(14), 0, dp(14), 0)
-        setOnClickListener { onClick() }
-        layoutParams = LinearLayout.LayoutParams(-2, dp(44)).apply { marginStart = dp(5) }
-    }
-    private fun gap() = View(this).apply { layoutParams = LinearLayout.LayoutParams(dp(14), 1) }
-    private fun label(t: String) = TextView(this).apply {
-        text = t; setTextColor(0xCCFFFFFF.toInt()); textSize = 13f
-        layoutParams = LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) }
-    }
-
-    private fun buildToolbar(): View {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            layoutDirection = View.LAYOUT_DIRECTION_RTL; setPadding(dp(10), 0, dp(10), 0)
-        }
-        penBtn = btn("עט") { mode = Mode.PEN; refreshUi() }
-        eraserBtn = btn("מחק") { mode = Mode.ERASER; refreshUi() }
-        row.addView(penBtn); row.addView(eraserBtn); row.addView(gap())
-
-        for (c in listOf(0xFF1B1C20.toInt(), 0xFF1F5FD1.toInt(), 0xFFD33A2C.toInt(), 0xFF198754.toInt())) {
-            val sw = View(this).apply {
-                layoutParams = LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginStart = dp(7) }
-                setOnClickListener { color = c; mode = Mode.PEN; refreshUi() }
-            }
-            swatches.add(sw to c); row.addView(sw)
-        }
-        row.addView(gap())
-
-        row.addView(label("עובי"))
-        val sizeLabel = label("%.0f".format(sizePx))
-        row.addView(SeekBar(this).apply {
-            max = 22; progress = (sizePx - 2).toInt()
-            layoutParams = LinearLayout.LayoutParams(dp(150), -2)
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) { sizePx = p + 2f; sizeLabel.text = "%.0f".format(sizePx) }
-                override fun onStartTrackingTouch(s: SeekBar?) {}
-                override fun onStopTrackingTouch(s: SeekBar?) {}
-            })
-        })
-        row.addView(sizeLabel); row.addView(gap())
-
-        pressureBtn = btn("לחץ") { usePressure = !usePressure; refreshUi() }
-        predictBtn = btn("חיזוי") { usePrediction = !usePrediction; refreshUi() }
-        fingerBtn = btn("אצבע כותבת") { fingerDraws = !fingerDraws; refreshUi() }
-        row.addView(pressureBtn); row.addView(predictBtn); row.addView(fingerBtn); row.addView(gap())
-
-        undoBtn = btn("↶") { undo() }; redoBtn = btn("↷") { redo() }; clearBtn = btn("נקה") { clearAll() }
-        row.addView(undoBtn); row.addView(redoBtn); row.addView(clearBtn); row.addView(gap())
-
-        diagBtn = btn("נתונים") { showDiag = !showDiag; refreshUi(); renderDiag() }
-        row.addView(diagBtn); row.addView(gap())
-
-        updateBtn = btn("בדוק עדכון") { onUpdateClick() }
-        row.addView(updateBtn)
-        row.addView(label("גרסה " + BuildConfig.VERSION_CODE))
-
-        return HorizontalScrollView(this).apply {
-            setBackgroundColor(BAR); isHorizontalScrollBarEnabled = false
-            layoutDirection = View.LAYOUT_DIRECTION_RTL
-            addView(row, FrameLayout.LayoutParams(-2, -1))
-        }
-    }
-
-    private fun style(b: Button, on: Boolean) {
-        b.background = round(if (on) ON else BTN)
-        b.setTextColor(if (on) 0xFF1B1B1B.toInt() else Color.WHITE)
-    }
-    private fun refreshUi() {
-        style(penBtn, mode == Mode.PEN); style(eraserBtn, mode == Mode.ERASER)
-        style(pressureBtn, usePressure); style(predictBtn, usePrediction)
-        style(fingerBtn, fingerDraws); style(diagBtn, showDiag)
-        for ((v, c) in swatches) v.background = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL; setColor(c)
-            if (c == this@MainActivity.color) setStroke(dp(3), ON) else setStroke(dp(2), 0x40FFFFFF)
-        }
-        undoBtn.isEnabled = undoS.isNotEmpty(); undoBtn.alpha = if (undoS.isEmpty()) 0.35f else 1f
-        redoBtn.isEnabled = redoS.isNotEmpty(); redoBtn.alpha = if (redoS.isEmpty()) 0.35f else 1f
-        val any = paper.strokes.isNotEmpty()
-        clearBtn.isEnabled = any; clearBtn.alpha = if (any) 1f else 0.35f
-    }
 }

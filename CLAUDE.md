@@ -33,7 +33,10 @@ The owner is a chemistry undergraduate; the app is mainly for lecture notes and 
 
 ## Roadmap (agreed order; adjust with the owner)
 1. ~~Writing canvas test~~ — done (pen, pressure, prediction, palm rejection, stroke eraser, undo/redo).
-2. Pages: continuous vertical scroll, paper backgrounds (lined / grid / blank), zoom.
+2. ~~Pages~~ — first version done: continuous vertical pages (A4 ratio, world units 1000x1414), finger scroll/fling,
+   pinch zoom (0.5x–5x of fit), paper lined/grid/dots/blank, auto-adds a page after the last used one.
+   UI follows Notability's *layout* (top bar + tool bar + pages) with our own visual design — never copy
+   their icons, colours or branding. Icons are Material Symbols (Apache 2.0) in res/drawable.
 3. Tools: highlighter, colors/widths, lasso select + move/resize, undo/redo polish.
 4. Organization: subjects → notebooks, local save.
 5. PDF import and annotation (lecture slides).
@@ -41,5 +44,8 @@ The owner is a chemistry undergraduate; the app is mainly for lecture notes and 
 7. Cloud sync across devices.
 
 ## Code map
-- `app/src/main/java/com/gever/notepro/MainActivity.kt` — writing screen, toolbar, input handling, diagnostics card.
-- `app/src/main/java/com/gever/notepro/Updater.kt` — GitHub release check + PackageInstaller update flow.
+- `MainActivity.kt` — editor screen: top bar (title, update chip, ⋯ menu), tool bar (tools, colours, widths, undo/redo, paper).
+- `NoteCanvasView.kt` — pages, view transform (world↔screen), pen vs finger input, eraser, undo/redo, rendering.
+  Known perf TODO: every frame redraws all visible strokes; add per-page bitmap caching when notes get long.
+- NOTHING IS SAVED YET — next stage is the library (subjects → notebooks) plus saving.
+- `Updater.kt` — GitHub release check + PackageInstaller update flow.
