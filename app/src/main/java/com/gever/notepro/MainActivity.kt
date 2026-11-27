@@ -137,6 +137,31 @@ class MainActivity : Activity() {
         overlay.addView(diag, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.LEFT).apply { setMargins(dp(12), dp(12), dp(12), dp(12)) })
         setContentView(root)
 
+        // Floating menu above a lasso selection.
+        val selMenu = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL
+            background = card(); elevation = 8 * d; setPadding(dp(6), dp(2), dp(6), dp(2)); visibility = View.GONE
+        }
+        fun selBtn(label: String, onClick: (View) -> Unit) = TextView(this).apply {
+            text = label; textSize = 14f; setTextColor(INK); setPadding(dp(14), dp(10), dp(14), dp(10))
+            setOnClickListener { onClick(it) }
+        }
+        selMenu.addView(selBtn("צבע") { showRecolor(it) })
+        selMenu.addView(selBtn("שכפול") { canvas.duplicateSelection() })
+        selMenu.addView(selBtn("מחיקה") { canvas.deleteSelection() })
+        root.addView(selMenu, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.LEFT))
+        canvas.onSelectionChanged = { r ->
+            if (r == null) selMenu.visibility = View.GONE
+            else {
+                selMenu.visibility = View.VISIBLE
+                selMenu.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+                val w = selMenu.measuredWidth; val h = selMenu.measuredHeight
+                selMenu.translationX = (r.centerX() - w / 2f).coerceIn(dp(8).toFloat(), (root.width - w - dp(8)).toFloat().coerceAtLeast(0f))
+                val above = r.top - h - dp(16)
+                selMenu.translationY = if (above > dp(90)) above else (r.bottom + dp(16)).coerceAtMost((root.height - h - dp(8)).toFloat())
+            }
+        }
+
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.displayCutout())
             overlay.setPadding(bars.left, bars.top, bars.right, 0)
@@ -240,7 +265,8 @@ class MainActivity : Activity() {
         for ((t, res, name) in listOf(
             Triple(Tool.PEN, R.drawable.ic_edit, "עט"),
             Triple(Tool.HIGHLIGHTER, R.drawable.ic_ink_highlighter, "מרקר"),
-            Triple(Tool.ERASER, R.drawable.ic_ink_eraser, "מחק"))) {
+            Triple(Tool.ERASER, R.drawable.ic_ink_eraser, "מחק"),
+            Triple(Tool.LASSO, R.drawable.ic_lasso, "בחירה"))) {
             val b = icon(res, name) { onToolTapped(t) }
             (b.layoutParams as LinearLayout.LayoutParams).apply { marginStart = dp(2); marginEnd = dp(2) }
             toolBtns[t] = b; tools.addView(b)
@@ -261,6 +287,7 @@ class MainActivity : Activity() {
 
     private fun selectTool(t: Tool) {
         if (t == Tool.ERASER && canvas.tool != Tool.ERASER) prevTool = canvas.tool
+        if (t != Tool.LASSO) canvas.clearSelection()
         canvas.tool = t
         applyColor(); refresh()
     }
@@ -284,6 +311,10 @@ class MainActivity : Activity() {
     private fun buildTray() {
         tray.removeAllViews()
         when (canvas.tool) {
+            Tool.LASSO -> {
+                tray.addView(chip("חופשי", canvas.lassoMode == NoteCanvasView.LassoMode.FREEFORM) { canvas.lassoMode = NoteCanvasView.LassoMode.FREEFORM; refresh() })
+                tray.addView(chip("מלבן", canvas.lassoMode == NoteCanvasView.LassoMode.RECT) { canvas.lassoMode = NoteCanvasView.LassoMode.RECT; refresh() })
+            }
             Tool.ERASER -> {
                 ERASER_SIZES.forEachIndexed { i, r ->
                     tray.addView(SizeDot(DOT_RADII[i], r == canvas.eraserRadiusDp, 0xFF9AA3AF.toInt()).apply {
@@ -353,6 +384,23 @@ class MainActivity : Activity() {
         content.addView(grid, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
         content.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
         pw.showAsDropDown(pill, (pill.width - content.measuredWidth) / 2, dp(8))
+    }
+
+    /** Colour grid for recolouring the lasso selection. */
+    private fun showRecolor(anchor: View) {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; layoutDirection = View.LAYOUT_DIRECTION_RTL
+            background = card(); elevation = 8 * d; setPadding(dp(14), dp(10), dp(14), dp(12))
+        }
+        content.addView(TextView(this).apply { text = "צבע לבחירה"; textSize = 14f; setTextColor(SUB) })
+        val grid = GridLayout(this).apply { columnCount = 8 }
+        val pw = PopupWindow(content, -2, -2, true).apply { setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT)); elevation = 8 * d }
+        for (c in PALETTE) grid.addView(Swatch(c, false).apply {
+            layoutParams = GridLayout.LayoutParams().apply { width = dp(40); height = dp(40) }
+            setOnClickListener { canvas.recolorSelection(c); pw.dismiss() }
+        })
+        content.addView(grid, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
+        pw.showAsDropDown(anchor, 0, dp(6))
     }
 
     /** A round colour swatch; ring + small chevron when selected (tap again = full palette). */

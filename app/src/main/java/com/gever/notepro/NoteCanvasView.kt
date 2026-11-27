@@ -39,7 +39,8 @@ import kotlin.math.min
  */
 class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
 
-    enum class Tool { PEN, HIGHLIGHTER, ERASER }
+    enum class Tool { PEN, HIGHLIGHTER, ERASER, LASSO }
+    enum class LassoMode { FREEFORM, RECT }
     enum class Paper { LINED, GRID, DOTS, BLANK }
     /** WHOLE removes touched strokes; PARTIAL cuts them, the remaining pieces stay normal strokes. */
     enum class EraserMode { WHOLE, PARTIAL }
@@ -176,6 +177,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         m.setScale(s, s); m.postTranslate(tx, ty); m.invert(inv)
         layer.invalidate()
         reportPage()
+        if (selection.isNotEmpty() && drag == Drag.NONE) notifySelection()
     }
 
     private var lastReported = -1L
@@ -231,6 +233,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         diagTool = toolName(type)
         strokeStart = e.eventTime; samples = 1
         val button = type == MotionEvent.TOOL_TYPE_ERASER || (e.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
+        if (tool == Tool.LASSO && !button) { lassoActive = true; lassoDown(e.getX(idx), e.getY(idx)); return }
         erasing = tool == Tool.ERASER || button
         eraseFromTool = tool == Tool.ERASER && !button
         if (erasing) { erasedNow.clear(); addedNow.clear(); eraseAt(e.getX(idx), e.getY(idx)) }
@@ -238,6 +241,21 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     }
 
     private fun penEvent(e: MotionEvent) {
+        if (lassoActive) {
+            val idx = e.findPointerIndex(penPointer)
+            when (e.actionMasked) {
+                MotionEvent.ACTION_MOVE -> if (idx >= 0) {
+                    for (h in 0 until e.historySize) lassoMove(e.getHistoricalX(idx, h), e.getHistoricalY(idx, h))
+                    lassoMove(e.getX(idx), e.getY(idx))
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (e.actionMasked == MotionEvent.ACTION_CANCEL || e.getPointerId(e.actionIndex) == penPointer) {
+                        lassoUp(); lassoActive = false; penPointer = -1
+                    }
+                }
+            }
+            return
+        }
         when (e.actionMasked) {
             MotionEvent.ACTION_MOVE -> {
                 val idx = e.findPointerIndex(penPointer)
@@ -444,6 +462,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
      * [dropPage]: strokes on this page are removed. [copyPage]: strokes on it are copied onto copyPage + 1.
      */
     private fun pageEdit(newPages: Int, shiftFrom: Int, shift: Int, dropPage: Int = -1, copyPage: Int = -1) {
+        clearSelection()
         val step = PAGE_H + GAP
         val removed = mutableListOf<Pair<Stroke, Int>>(); val added = mutableListOf<Stroke>()
         val marksBefore = bookmarks.toSet()
@@ -478,6 +497,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     }
 
     fun undo() {
+        clearSelection()
         val a = undoS.removeLastOrNull() ?: return
         when (a) {
             is Act.Add -> strokes.remove(a.s)
@@ -493,6 +513,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     }
 
     fun redo() {
+        clearSelection()
         val a = redoS.removeLastOrNull() ?: return
         when (a) {
             is Act.Add -> strokes.add(a.s)
@@ -507,6 +528,157 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         undoS.addLast(a); dirty = true; layer.invalidate(); onHistoryChanged?.invoke()
     }
 
+    // ================= lasso selection =================
+    var lassoMode = LassoMode.FREEFORM
+    /** Selection bounds in SCREEN pixels, or null when nothing is selected. */
+    var onSelectionChanged: ((RectF?) -> Unit)? = null
+    private var lassoActive = false
+    private enum class Drag { NONE, DRAW, MOVE, RESIZE }
+    private var drag = Drag.NONE
+    private val lassoPts = ArrayList<Float>()          // world x,y pairs
+    private val selection = mutableListOf<Stroke>()
+    private val selBounds = RectF()
+    private var dragX0 = 0f; private var dragY0 = 0f
+    private var selDx = 0f; private var selDy = 0f; private var selK = 1f
+    val hasSelection get() = selection.isNotEmpty()
+
+    private fun lassoDown(x: Float, y: Float) {
+        val w = toWorld(x, y)
+        dragX0 = w[0]; dragY0 = w[1]; selDx = 0f; selDy = 0f; selK = 1f
+        if (selection.isNotEmpty()) {
+            val hr = 24 * d / s
+            if (kotlin.math.hypot(w[0] - selBounds.right, w[1] - selBounds.bottom) < hr) { drag = Drag.RESIZE; return }
+            val pad = 10 * d / s
+            if (w[0] in selBounds.left - pad..selBounds.right + pad && w[1] in selBounds.top - pad..selBounds.bottom + pad) { drag = Drag.MOVE; notifySelection(true); return }
+        }
+        clearSelection()
+        drag = Drag.DRAW; lassoPts.clear(); lassoPts.add(w[0]); lassoPts.add(w[1])
+    }
+
+    private fun lassoMove(x: Float, y: Float) {
+        val w = toWorld(x, y)
+        when (drag) {
+            Drag.DRAW -> {
+                if (lassoMode == LassoMode.RECT) { while (lassoPts.size > 2) lassoPts.removeAt(lassoPts.size - 1) }
+                lassoPts.add(w[0]); lassoPts.add(w[1])
+            }
+            Drag.MOVE -> { selDx = w[0] - dragX0; selDy = w[1] - dragY0 }
+            Drag.RESIZE -> {
+                val bw = selBounds.width().coerceAtLeast(1f); val bh = selBounds.height().coerceAtLeast(1f)
+                val kx = (w[0] - selBounds.left) / bw; val ky = (w[1] - selBounds.top) / bh
+                selK = ((kx + ky) / 2).coerceIn(0.2f, 6f)
+            }
+            Drag.NONE -> {}
+        }
+        layer.invalidate()
+    }
+
+    private fun lassoUp() {
+        when (drag) {
+            Drag.DRAW -> {
+                val poly = if (lassoMode == LassoMode.RECT && lassoPts.size >= 4) {
+                    val x0 = lassoPts[0]; val y0 = lassoPts[1]; val x1 = lassoPts[lassoPts.size - 2]; val y1 = lassoPts[lassoPts.size - 1]
+                    floatArrayOf(x0, y0, x1, y0, x1, y1, x0, y1)
+                } else lassoPts.toFloatArray()
+                lassoPts.clear()
+                if (poly.size >= 6) {
+                    val p = StrokeInput()
+                    for (st in strokes) {
+                        val inputs = st.inputs; var inside = 0
+                        for (k in 0 until inputs.size) { inputs.populate(k, p); if (pointInPoly(p.x, p.y, poly)) inside++ }
+                        if (inputs.size > 0 && inside * 2 >= inputs.size) selection.add(st)
+                    }
+                }
+                updateSelBounds()
+            }
+            Drag.MOVE, Drag.RESIZE -> if (selDx != 0f || selDy != 0f || selK != 1f) {
+                replaceSelection { st -> transformed(st, selBounds.left, selBounds.top, selK, selDx, selDy) }
+            }
+            Drag.NONE -> {}
+        }
+        drag = Drag.NONE; selDx = 0f; selDy = 0f; selK = 1f
+        layer.invalidate(); notifySelection()
+    }
+
+    private fun pointInPoly(x: Float, y: Float, poly: FloatArray): Boolean {
+        var inside = false; var j = poly.size - 2; var i = 0
+        while (i < poly.size) {
+            val xi = poly[i]; val yi = poly[i + 1]; val xj = poly[j]; val yj = poly[j + 1]
+            if ((yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside
+            j = i; i += 2
+        }
+        return inside
+    }
+
+    private fun updateSelBounds() {
+        selBounds.setEmpty()
+        for (st in selection) { val b = boundsOf(st); if (selBounds.isEmpty) selBounds.set(b) else selBounds.union(b) }
+    }
+
+    private fun transformed(st: Stroke, ax: Float, ay: Float, k: Float, dx: Float, dy: Float, color: Int? = null): Stroke {
+        val inputs = st.inputs; val p = StrokeInput(); val batch = MutableStrokeInputBatch()
+        for (i in 0 until inputs.size) {
+            inputs.populate(i, p)
+            p.update(ax + (p.x - ax) * k + dx, ay + (p.y - ay) * k + dy, p.elapsedTimeMillis, p.toolType,
+                p.strokeUnitLengthCm, p.pressure, p.tiltRadians, p.orientationRadians)
+            batch.add(p)
+        }
+        val b = st.brush
+        val brush = Brush.createWithColorIntArgb(b.family, color ?: b.colorIntArgb, b.size * k, b.epsilon)
+        return Stroke(brush, batch.toImmutable())
+    }
+
+    /** Replaces every selected stroke by f(stroke), as one undoable step; the new strokes stay selected. */
+    private fun replaceSelection(f: (Stroke) -> Stroke) {
+        val removed = mutableListOf<Pair<Stroke, Int>>(); val added = mutableListOf<Stroke>()
+        for (st in selection) { val k = strokes.indexOf(st); if (k >= 0) removed += st to k }
+        removed.sortBy { it.second }
+        for (r in removed.asReversed()) strokes.removeAt(r.second)
+        for (r in removed) added += f(r.first)
+        strokes.addAll(added)
+        selection.clear(); selection.addAll(added); updateSelBounds()
+        growPagesFor(added)
+        push(Act.Edit(removed, added))
+        layer.invalidate()
+    }
+
+    private fun growPagesFor(list: List<Stroke>) {
+        var last = pages - 2
+        for (st in list) last = maxOf(last, floor((boundsOf(st).bottom - GAP) / (PAGE_H + GAP)).toInt())
+        if (last + 2 > pages) { pages = last + 2; clampAndApply() }
+    }
+
+    fun clearSelection() {
+        if (selection.isEmpty() && lassoPts.isEmpty()) return
+        selection.clear(); lassoPts.clear(); selBounds.setEmpty(); layer.invalidate(); notifySelection()
+    }
+
+    fun deleteSelection() {
+        val removed = selection.mapNotNull { st -> strokes.indexOf(st).takeIf { it >= 0 }?.let { st to it } }.sortedBy { it.second }
+        for (r in removed.asReversed()) strokes.removeAt(r.second)
+        push(Act.Edit(removed, emptyList()))
+        selection.clear(); selBounds.setEmpty(); layer.invalidate(); notifySelection()
+    }
+
+    fun duplicateSelection() {
+        val off = 40f
+        val copies = selection.map { transformed(it, 0f, 0f, 1f, off, off) }
+        strokes.addAll(copies); growPagesFor(copies)
+        push(Act.Edit(emptyList(), copies))
+        selection.clear(); selection.addAll(copies); updateSelBounds(); layer.invalidate(); notifySelection()
+    }
+
+    /** Recolours the selection; highlighter strokes keep their transparency. */
+    fun recolorSelection(color: Int) = replaceSelection { st ->
+        val c = if (st.brush.family == Families.highlighter) (HL_ALPHA shl 24) or (color and 0xFFFFFF) else color
+        transformed(st, 0f, 0f, 1f, 0f, 0f, c)
+    }
+
+    private fun notifySelection(hideMenu: Boolean = false) {
+        if (selection.isEmpty() || hideMenu) { onSelectionChanged?.invoke(null); return }
+        val r = RectF(selBounds); m.mapRect(r); onSelectionChanged?.invoke(r)
+    }
+
     // ================= drawing =================
     private inner class PaperLayer(ctx: Context) : View(ctx) {
         val renderer = CanvasStrokeRenderer.create()
@@ -516,6 +688,9 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         private val gridPaint = Paint().apply { color = 0xFFE1E6EE.toInt(); strokeWidth = 1.2f }
         private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFB8C2D0.toInt() }
         private val page = RectF()
+        private val selPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = ACCENT }
+        private val handlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+        private val lassoPath = android.graphics.Path()
 
         override fun onDraw(c: Canvas) {
             val visTop = (0f - ty) / s; val visBottom = (height - ty) / s
@@ -530,10 +705,39 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                 c.drawRect(page, pagePaint)
                 drawPattern(c, page)
             }
+            val moving = selection.isNotEmpty() && (selDx != 0f || selDy != 0f || selK != 1f)
             for (st in strokes) {
                 val b = boundsOf(st)
                 if (b.bottom < visTop || b.top > visBottom || b.right < visLeft || b.left > visRight) continue
+                if (moving && st in selection) continue
                 renderer.draw(c, st, m)
+            }
+            if (selection.isNotEmpty()) {
+                val t = Matrix().apply { setScale(selK, selK, selBounds.left, selBounds.top); postTranslate(selDx, selDy) }
+                if (moving) {
+                    c.save(); c.concat(t)
+                    val full = Matrix(m).apply { preConcat(t) }
+                    for (st in selection) renderer.draw(c, st, full)
+                    c.restore()
+                }
+                val r = RectF(selBounds); t.mapRect(r)
+                val pad = 8 * d / s
+                r.inset(-pad, -pad)
+                selPaint.strokeWidth = 1.5f * d / s
+                selPaint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(8 * d / s, 6 * d / s), 0f)
+                c.drawRect(r, selPaint)
+                c.drawCircle(r.right, r.bottom, 7 * d / s, handlePaint)
+                c.drawCircle(r.right, r.bottom, 7 * d / s, selPaint.apply { pathEffect = null })
+            }
+            if (lassoPts.size >= 4) {
+                lassoPath.reset(); lassoPath.moveTo(lassoPts[0], lassoPts[1])
+                if (lassoMode == LassoMode.RECT) {
+                    val x1 = lassoPts[lassoPts.size - 2]; val y1 = lassoPts[lassoPts.size - 1]
+                    lassoPath.lineTo(x1, lassoPts[1]); lassoPath.lineTo(x1, y1); lassoPath.lineTo(lassoPts[0], y1); lassoPath.close()
+                } else { var i = 2; while (i < lassoPts.size) { lassoPath.lineTo(lassoPts[i], lassoPts[i + 1]); i += 2 } }
+                selPaint.strokeWidth = 1.5f * d / s
+                selPaint.pathEffect = android.graphics.DashPathEffect(floatArrayOf(8 * d / s, 6 * d / s), 0f)
+                c.drawPath(lassoPath, selPaint)
             }
             c.restore()
         }
