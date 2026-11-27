@@ -76,5 +76,10 @@ On the owner's Windows PC: JDK 17 and the Android SDK are portable in `%LOCALAPP
 - `NoteCanvasView.kt` — pages, view transform (world↔screen), pen vs finger input, whole/partial eraser,
   undo/redo, rendering, page counter callback.
   Known perf TODO: every frame redraws all visible strokes; add per-page bitmap caching when notes get long.
-- NOTHING IS SAVED YET — next stage is the library (subjects → notebooks) plus saving.
+- `LibraryActivity.kt` — launcher/home: sidebar (All / Recent / Favourites / Unfiled, nested folders with
+  colour or emoji, long-press menu), note-card grid with thumbnails and `⋮` menu, search, "+ הערה חדשה".
+- `NoteStore.kt` — local storage in filesDir: library.json (folders), notes/<id>/meta.json, ink.bin (own
+  binary stroke format), thumb.png. `Families` holds the brush-family singletons used to tag strokes.
+- Notes save on leaving the editor (onPause) when anything changed.
+- Round 2 plan and order: docs/design-research.md → "Round 2 build plan".
 - `Updater.kt` — GitHub release check + PackageInstaller update flow.

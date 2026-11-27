@@ -190,9 +190,9 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         (fingerDraws && toolType == MotionEvent.TOOL_TYPE_FINGER)
 
     private fun brush(): Brush = when (tool) {
-        Tool.HIGHLIGHTER -> Brush.createWithColorIntArgb(StockBrushes.highlighter(), hlColor, hlSize, 0.1f)
+        Tool.HIGHLIGHTER -> Brush.createWithColorIntArgb(Families.highlighter, hlColor, hlSize, 0.1f)
         else -> Brush.createWithColorIntArgb(
-            if (usePressure) StockBrushes.pressurePen() else StockBrushes.marker(), penColor, penSize, 0.05f)
+            if (usePressure) Families.pen else Families.marker, penColor, penSize, 0.05f)
     }
 
     private fun onInput(e: MotionEvent): Boolean {
@@ -378,7 +378,38 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         return runs.filter { it.size >= 2 }.map { Stroke(st.brush, it.toImmutable()) }
     }
 
-    private fun push(a: Act) { undoS.addLast(a); redoS.clear(); onHistoryChanged?.invoke() }
+    private fun push(a: Act) { undoS.addLast(a); redoS.clear(); dirty = true; onHistoryChanged?.invoke() }
+
+    // ================= persistence =================
+    /** True when strokes changed since the last load / markSaved(). */
+    var dirty = false; private set
+    fun markSaved() { dirty = false }
+    fun strokesSnapshot(): List<Stroke> = strokes.toList()
+
+    fun load(list: List<Stroke>) {
+        strokes.clear(); bounds.clear(); undoS.clear(); redoS.clear()
+        strokes.addAll(list)
+        var lastPage = 0
+        for (st in list) lastPage = maxOf(lastPage, floor((boundsOf(st).bottom - GAP) / (PAGE_H + GAP)).toInt())
+        pages = lastPage + 2
+        dirty = false
+        if (width > 0) clampAndApply()
+        layer.invalidate(); onHistoryChanged?.invoke()
+    }
+
+    /** Renders the first page (paper + ink) into a small bitmap for the library card. */
+    fun renderThumbnail(widthPx: Int): android.graphics.Bitmap {
+        val sc = widthPx / PAGE_W
+        val bmp = android.graphics.Bitmap.createBitmap(widthPx, (PAGE_H * sc).toInt(), android.graphics.Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        val tm = Matrix().apply { setScale(sc, sc); postTranslate(0f, -GAP * sc) }
+        c.concat(tm)
+        val page = RectF(0f, GAP, PAGE_W, GAP + PAGE_H)
+        c.drawRect(page, Paint().apply { color = paperColor })
+        layer.drawPattern(c, page)
+        for (st in strokes) if (boundsOf(st).top < page.bottom) layer.renderer.draw(c, st, tm)
+        return bmp
+    }
 
     fun undo() {
         val a = undoS.removeLastOrNull() ?: return
@@ -389,7 +420,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                 for (p in a.removed.asReversed()) strokes.add(p.second.coerceAtMost(strokes.size), p.first)
             }
         }
-        redoS.addLast(a); layer.invalidate(); onHistoryChanged?.invoke()
+        redoS.addLast(a); dirty = true; layer.invalidate(); onHistoryChanged?.invoke()
     }
 
     fun redo() {
@@ -401,12 +432,12 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                 strokes.addAll(a.added)
             }
         }
-        undoS.addLast(a); layer.invalidate(); onHistoryChanged?.invoke()
+        undoS.addLast(a); dirty = true; layer.invalidate(); onHistoryChanged?.invoke()
     }
 
     // ================= drawing =================
     private inner class PaperLayer(ctx: Context) : View(ctx) {
-        private val renderer = CanvasStrokeRenderer.create()
+        val renderer = CanvasStrokeRenderer.create()
         private val pagePaint = Paint()
         private val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0x1A000000 }
         private val rulePaint = Paint().apply { color = 0xFFD5E1F2.toInt(); strokeWidth = 1.4f }
@@ -435,7 +466,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
             c.restore()
         }
 
-        private fun drawPattern(c: Canvas, p: RectF) {
+        fun drawPattern(c: Canvas, p: RectF) {
             when (paper) {
                 Paper.BLANK -> Unit
                 Paper.LINED -> {

@@ -33,6 +33,11 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+const val EXTRA_NOTE = "note_id"
+
+/** "הערה · 27 בנוב׳ 2026" */
+fun defaultTitle(): String = "הערה · " + SimpleDateFormat("d בMMM yyyy", Locale.forLanguageTag("he")).format(Date())
+
 private val PEN_SIZES = floatArrayOf(2.4f, 4f, 6.5f)
 private val HL_SIZES = floatArrayOf(18f, 28f, 40f)
 private val ERASER_SIZES = floatArrayOf(6f, 12f, 24f)   // radius, screen dp
@@ -64,6 +69,11 @@ class MainActivity : Activity() {
     private var showDiag = false
     private var pending: Updater.Release? = null
 
+    private val store by lazy { NoteStore(this) }
+    private lateinit var meta: NoteMeta
+    private lateinit var titleView: TextView
+    private var metaDirty = false
+
     // Each inking tool keeps 5 quick colour slots; the selected slot is the active colour.
     private val penSlots = intArrayOf(PALETTE[0], PALETTE[3], PALETTE[8], PALETTE[6], PALETTE[11])
     private val hlSlots = intArrayOf(HL_PALETTE[0], HL_PALETTE[10], HL_PALETTE[4], HL_PALETTE[8], HL_PALETTE[2])
@@ -78,6 +88,8 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        meta = intent.getStringExtra(EXTRA_NOTE)?.let { store.note(it) }
+            ?: store.create(defaultTitle(), null)
 
         canvas = NoteCanvasView(this).apply { sideInset = 76 * d }
         val root = FrameLayout(this)
@@ -126,6 +138,11 @@ class MainActivity : Activity() {
             isAppearanceLightStatusBars = true
         }
 
+        runCatching { canvas.paper = NoteCanvasView.Paper.valueOf(meta.paper) }
+        if (meta.paperColor != -1) canvas.paperColor = meta.paperColor
+        canvas.load(store.loadStrokes(meta.id))
+        meta.opened = System.currentTimeMillis(); store.saveMeta(meta)
+
         canvas.onHistoryChanged = { refreshHistory() }
         canvas.onPageChanged = { cur, total -> pageChip.text = "עמוד $cur מתוך $total" }
         canvas.onEraseEnded = { fromTool -> if (fromTool && autoDeselectEraser && canvas.tool == Tool.ERASER) selectTool(prevTool) }
@@ -135,6 +152,29 @@ class MainActivity : Activity() {
     }
 
     override fun onResume() { super.onResume(); checkForUpdate(manual = false) }
+
+    override fun onPause() { super.onPause(); save() }
+
+    /** Writes ink, metadata and the library thumbnail if anything changed. */
+    private fun save() {
+        if (!canvas.dirty && !metaDirty) return
+        meta.modified = System.currentTimeMillis()
+        meta.paper = canvas.paper.name; meta.paperColor = canvas.paperColor
+        if (canvas.dirty) store.saveStrokes(meta.id, canvas.strokesSnapshot())
+        store.saveMeta(meta)
+        store.saveThumbnail(meta.id, canvas.renderThumbnail(360))
+        canvas.markSaved(); metaDirty = false
+    }
+
+    private fun renameDialog() {
+        val input = android.widget.EditText(this).apply { setText(meta.title); setSelection(text.length); textDirection = View.TEXT_DIRECTION_RTL }
+        android.app.AlertDialog.Builder(this).setTitle("שם ההערה").setView(input)
+            .setPositiveButton("שמירה") { _, _ ->
+                val t = input.text.toString().trim()
+                if (t.isNotEmpty()) { meta.title = t; titleView.text = t; metaDirty = true }
+            }
+            .setNegativeButton("ביטול", null).show()
+    }
 
     // ================= shared widgets =================
     private fun icon(res: Int, desc: String, size: Int = 44, onClick: () -> Unit) = ImageButton(this).apply {
@@ -159,16 +199,15 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             layoutDirection = View.LAYOUT_DIRECTION_RTL
         }
-        row.addView(icon(R.drawable.ic_arrow_forward_ios, "ספרייה") {
-            Toast.makeText(this, "הספרייה (נושאים ומחברות) מגיעה בשלב הבא", Toast.LENGTH_SHORT).show()
-        })
-        val date = SimpleDateFormat("d בMMM yyyy", Locale.forLanguageTag("he")).format(Date())
-        row.addView(TextView(this).apply {
-            text = "הערה · $date"; textSize = 15f; setTextColor(SUB)
+        row.addView(icon(R.drawable.ic_arrow_forward_ios, "ספרייה") { finish() })
+        titleView = TextView(this).apply {
+            text = meta.title; textSize = 15f; setTextColor(SUB)
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             maxWidth = dp(170); maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
-            setPadding(dp(2), 0, dp(6), 0)
-        })
+            setPadding(dp(2), dp(8), dp(6), dp(8))
+            setOnClickListener { renameDialog() }
+        }
+        row.addView(titleView)
         return row
     }
 
@@ -356,7 +395,7 @@ class MainActivity : Activity() {
     }
 
     private fun showPaperDialog() {
-        PaperDialog(this, canvas.paper, canvas.paperColor) { p, c -> canvas.paper = p; canvas.paperColor = c }.show()
+        PaperDialog(this, canvas.paper, canvas.paperColor) { p, c -> canvas.paper = p; canvas.paperColor = c; metaDirty = true }.show()
     }
 
     private fun showMoreMenu(anchor: View) {
