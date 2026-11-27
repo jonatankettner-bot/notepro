@@ -82,12 +82,16 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     // ---- document ----
     private val strokes = mutableListOf<Stroke>()
     private val bounds = IdentityHashMap<Stroke, RectF>()
-    private var pages = 1
+    var pages = 1; private set
+    /** Bookmarked pages (0-based). */
+    val bookmarks = sortedSetOf<Int>()
 
     private sealed class Act {
         class Add(val s: Stroke) : Act()
-        /** An eraser pass: strokes removed (with their old index) and pieces added by the partial eraser. */
-        class Edit(val removed: List<Pair<Stroke, Int>>, val added: List<Stroke>) : Act()
+        /** An eraser pass or page operation: strokes removed (with their old index) and strokes added. */
+        class Edit(val removed: List<Pair<Stroke, Int>>, val added: List<Stroke>,
+                   val pagesBefore: Int = -1, val pagesAfter: Int = -1,
+                   val marksBefore: Set<Int>? = null, val marksAfter: Set<Int>? = null) : Act()
     }
     private val undoS = ArrayDeque<Act>()
     private val redoS = ArrayDeque<Act>()
@@ -397,18 +401,80 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         layer.invalidate(); onHistoryChanged?.invoke()
     }
 
-    /** Renders the first page (paper + ink) into a small bitmap for the library card. */
-    fun renderThumbnail(widthPx: Int): android.graphics.Bitmap {
+    /** Renders one page (paper + ink) into a small bitmap (library card, pages panel). */
+    fun renderThumbnail(widthPx: Int, pageIndex: Int = 0): android.graphics.Bitmap {
         val sc = widthPx / PAGE_W
+        val top = pageTop(pageIndex)
         val bmp = android.graphics.Bitmap.createBitmap(widthPx, (PAGE_H * sc).toInt(), android.graphics.Bitmap.Config.ARGB_8888)
         val c = Canvas(bmp)
-        val tm = Matrix().apply { setScale(sc, sc); postTranslate(0f, -GAP * sc) }
+        val tm = Matrix().apply { setScale(sc, sc); postTranslate(0f, -top * sc) }
         c.concat(tm)
-        val page = RectF(0f, GAP, PAGE_W, GAP + PAGE_H)
+        val page = RectF(0f, top, PAGE_W, top + PAGE_H)
         c.drawRect(page, Paint().apply { color = paperColor })
         layer.drawPattern(c, page)
-        for (st in strokes) if (boundsOf(st).top < page.bottom) layer.renderer.draw(c, st, tm)
+        for (st in strokes) { val b = boundsOf(st); if (b.bottom > page.top && b.top < page.bottom) layer.renderer.draw(c, st, tm) }
         return bmp
+    }
+
+    // ================= pages =================
+    fun currentPage(): Int = (floor(((height / 2f - ty) / s - GAP / 2) / (PAGE_H + GAP)).toInt()).coerceIn(0, pages - 1)
+
+    fun scrollToPage(i: Int) {
+        scroller.forceFinished(true)
+        ty = topInset - (pageTop(i) - GAP / 2) * s
+        clampAndApply()
+    }
+
+    private fun pageOf(st: Stroke): Int { val b = boundsOf(st); return floor(((b.top + b.bottom) / 2 - GAP / 2) / (PAGE_H + GAP)).toInt() }
+
+    fun pageHasInk(i: Int) = strokes.any { pageOf(it) == i }
+
+    private fun moved(st: Stroke, dy: Float): Stroke {
+        val inputs = st.inputs; val p = StrokeInput(); val batch = MutableStrokeInputBatch()
+        for (k in 0 until inputs.size) {
+            inputs.populate(k, p)
+            p.update(p.x, p.y + dy, p.elapsedTimeMillis, p.toolType, p.strokeUnitLengthCm, p.pressure, p.tiltRadians, p.orientationRadians)
+            batch.add(p)
+        }
+        return Stroke(st.brush, batch.toImmutable())
+    }
+
+    /**
+     * Generic page edit, undoable as one step. [shiftFrom]/[shift]: pages >= shiftFrom move by [shift] pages.
+     * [dropPage]: strokes on this page are removed. [copyPage]: strokes on it are copied onto copyPage + 1.
+     */
+    private fun pageEdit(newPages: Int, shiftFrom: Int, shift: Int, dropPage: Int = -1, copyPage: Int = -1) {
+        val step = PAGE_H + GAP
+        val removed = mutableListOf<Pair<Stroke, Int>>(); val added = mutableListOf<Stroke>()
+        val marksBefore = bookmarks.toSet()
+        for ((k, st) in strokes.withIndex()) {
+            val pg = pageOf(st)
+            when {
+                pg == dropPage -> removed += st to k
+                pg >= shiftFrom && shift != 0 -> { removed += st to k; added += moved(st, shift * step) }
+            }
+            if (pg == copyPage) added += moved(st, step)
+        }
+        for (r in removed.asReversed()) strokes.removeAt(r.second)
+        strokes.addAll(added)
+        val newMarks = bookmarks.mapNotNull { b -> when { b == dropPage -> null; b >= shiftFrom -> b + shift; else -> b } }.toSet()
+        bookmarks.clear(); bookmarks.addAll(newMarks)
+        val before = pages
+        pages = maxOf(1, newPages)
+        push(Act.Edit(removed, added, before, pages, marksBefore, bookmarks.toSet()))
+        clampAndApply(); layer.invalidate()
+    }
+
+    fun insertPageAfter(i: Int) = pageEdit(pages + 1, i + 1, 1)
+    fun duplicatePage(i: Int) = pageEdit(pages + 1, i + 1, 1, copyPage = i)
+    fun clearPage(i: Int) = pageEdit(pages, Int.MAX_VALUE, 0, dropPage = i)
+    fun deletePage(i: Int) = pageEdit(pages - 1, i + 1, -1, dropPage = i)
+    fun toggleBookmark(i: Int) { if (!bookmarks.remove(i)) bookmarks.add(i); dirty = true }
+
+    /** Restores pages / bookmarks saved with the note (after load()). */
+    fun restorePages(count: Int, marks: Collection<Int>) {
+        pages = maxOf(pages, count); bookmarks.clear(); bookmarks.addAll(marks.filter { it < pages })
+        if (width > 0) clampAndApply()
     }
 
     fun undo() {
@@ -418,6 +484,9 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
             is Act.Edit -> {
                 for (s in a.added) strokes.remove(s)
                 for (p in a.removed.asReversed()) strokes.add(p.second.coerceAtMost(strokes.size), p.first)
+                if (a.pagesBefore > 0) pages = a.pagesBefore
+                a.marksBefore?.let { bookmarks.clear(); bookmarks.addAll(it) }
+                if (a.pagesBefore > 0) clampAndApply()
             }
         }
         redoS.addLast(a); dirty = true; layer.invalidate(); onHistoryChanged?.invoke()
@@ -430,6 +499,9 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
             is Act.Edit -> {
                 for (p in a.removed) strokes.remove(p.first)
                 strokes.addAll(a.added)
+                if (a.pagesAfter > 0) pages = a.pagesAfter
+                a.marksAfter?.let { bookmarks.clear(); bookmarks.addAll(it) }
+                if (a.pagesAfter > 0) clampAndApply()
             }
         }
         undoS.addLast(a); dirty = true; layer.invalidate(); onHistoryChanged?.invoke()

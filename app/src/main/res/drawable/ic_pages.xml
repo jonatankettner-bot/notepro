@@ -1,0 +1,14 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="960"
+    android:viewportHeight="960">
+  <!-- Two stacked pages (own drawing). -->
+  <path
+      android:fillColor="#FF000000"
+      android:fillType="evenOdd"
+      android:pathData="M320,200L760,200L760,800L320,800ZM380,260L380,740L700,740L700,260Z"/>
+  <path
+      android:fillColor="#FF000000"
+      android:pathData="M200,120L620,120L620,170L250,170L250,700L200,700Z"/>
+</vector>

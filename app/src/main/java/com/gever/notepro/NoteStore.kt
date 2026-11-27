@@ -37,6 +37,8 @@ data class NoteMeta(
     var favorite: Boolean,
     var paper: String,
     var paperColor: Int,
+    var pages: Int = 1,
+    var bookmarks: List<Int> = emptyList(),
 )
 
 /**
@@ -80,7 +82,9 @@ class NoteStore(ctx: Context) {
         val o = JSONObject(File(dir, "meta.json").readText())
         NoteMeta(o.getString("id"), o.getString("title"), o.optString("folder").ifEmpty { null },
             o.getLong("created"), o.getLong("modified"), o.optLong("opened", o.getLong("modified")),
-            o.optBoolean("favorite"), o.optString("paper", "LINED"), o.optInt("paperColor", -1))
+            o.optBoolean("favorite"), o.optString("paper", "LINED"), o.optInt("paperColor", -1),
+            o.optInt("pages", 1),
+            o.optJSONArray("bookmarks")?.let { a -> List(a.length()) { a.getInt(it) } } ?: emptyList())
     } catch (_: Exception) { null }
 
     fun saveMeta(m: NoteMeta) {
@@ -88,6 +92,7 @@ class NoteStore(ctx: Context) {
         val o = JSONObject().put("id", m.id).put("title", m.title).put("folder", m.folderId ?: "")
             .put("created", m.created).put("modified", m.modified).put("opened", m.opened)
             .put("favorite", m.favorite).put("paper", m.paper).put("paperColor", m.paperColor)
+            .put("pages", m.pages).put("bookmarks", JSONArray(m.bookmarks))
         atomicWrite(File(dir, "meta.json"), o.toString().toByteArray())
     }
 

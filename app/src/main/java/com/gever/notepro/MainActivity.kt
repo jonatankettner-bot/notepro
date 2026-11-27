@@ -73,6 +73,13 @@ class MainActivity : Activity() {
     private lateinit var meta: NoteMeta
     private lateinit var titleView: TextView
     private var metaDirty = false
+    private lateinit var pagesPanel: PagesPanel
+
+    private fun togglePages() {
+        val v = pagesPanel.view
+        if (v.visibility == View.VISIBLE) v.visibility = View.GONE
+        else { pagesPanel.refresh(); v.visibility = View.VISIBLE }
+    }
 
     // Each inking tool keeps 5 quick colour slots; the selected slot is the active colour.
     private val penSlots = intArrayOf(PALETTE[0], PALETTE[3], PALETTE[8], PALETTE[6], PALETTE[11])
@@ -112,6 +119,10 @@ class MainActivity : Activity() {
         overlay.addView(pill, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(10) })
         overlay.addView(rail(), FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.LEFT).apply {
             setMargins(dp(12), dp(10), 0, 0) })
+        pagesPanel = PagesPanel(this, canvas) { togglePages() }
+        overlay.addView(pagesPanel.view, FrameLayout.LayoutParams(dp(210), -1, Gravity.RIGHT).apply {
+            setMargins(0, dp(64), dp(12), dp(56)) })
+        pagesPanel.view.visibility = View.GONE
 
         pageChip = TextView(this).apply {
             textSize = 13f; setTextColor(SUB); background = rounded(0xE6FFFFFF.toInt(), 14f)
@@ -141,10 +152,15 @@ class MainActivity : Activity() {
         runCatching { canvas.paper = NoteCanvasView.Paper.valueOf(meta.paper) }
         if (meta.paperColor != -1) canvas.paperColor = meta.paperColor
         canvas.load(store.loadStrokes(meta.id))
+        canvas.restorePages(meta.pages, meta.bookmarks)
         meta.opened = System.currentTimeMillis(); store.saveMeta(meta)
 
         canvas.onHistoryChanged = { refreshHistory() }
-        canvas.onPageChanged = { cur, total -> pageChip.text = "עמוד $cur מתוך $total" }
+        canvas.onPageChanged = { cur, total ->
+            pageChip.text = "עמוד $cur מתוך $total"
+            if (pagesPanel.view.visibility == View.VISIBLE) pagesPanel.refresh()
+        }
+        pageChip.setOnClickListener { togglePages() }
         canvas.onEraseEnded = { fromTool -> if (fromTool && autoDeselectEraser && canvas.tool == Tool.ERASER) selectTool(prevTool) }
         applyColor()
         refresh()
@@ -160,6 +176,7 @@ class MainActivity : Activity() {
         if (!canvas.dirty && !metaDirty) return
         meta.modified = System.currentTimeMillis()
         meta.paper = canvas.paper.name; meta.paperColor = canvas.paperColor
+        meta.pages = canvas.pages; meta.bookmarks = canvas.bookmarks.toList()
         if (canvas.dirty) store.saveStrokes(meta.id, canvas.strokesSnapshot())
         store.saveMeta(meta)
         store.saveThumbnail(meta.id, canvas.renderThumbnail(360))
@@ -382,6 +399,7 @@ class MainActivity : Activity() {
         redoBtn = icon(R.drawable.ic_redo, "חזרה") { canvas.redo() }
         col.addView(undoBtn); col.addView(redoBtn)
         col.addView(View(this).apply { setBackgroundColor(LINE) }, LinearLayout.LayoutParams(dp(26), 1).apply { topMargin = dp(6); bottomMargin = dp(6) })
+        col.addView(icon(R.drawable.ic_pages, "עמודים") { togglePages() })
         col.addView(icon(R.drawable.ic_grid_on, "תבנית נייר") { showPaperDialog() })
         val more = icon(R.drawable.ic_more_vert, "עוד") {}
         more.setOnClickListener { showMoreMenu(more) }
