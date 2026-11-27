@@ -20,6 +20,7 @@ import androidx.ink.authoring.InProgressStrokesView
 import androidx.ink.authoring.latency.LatencyData
 import androidx.ink.authoring.latency.LatencyDataCallback
 import androidx.ink.brush.Brush
+import androidx.ink.brush.InputToolType
 import androidx.ink.brush.StockBrushes
 import androidx.ink.geometry.ImmutableBox
 import androidx.ink.geometry.ImmutableVec
@@ -51,10 +52,16 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         const val GAP = 36f               // grey space between pages
         const val RULE = 34f              // line / grid spacing
         private const val DESK = 0xFFE6E9EE.toInt()
+        /** How long the pen must rest before a stroke snaps to a shape. */
+        private const val HOLD_MS = 420L
+        private const val NO_DRAG = -1
+        private const val BODY = -2
+        private const val ROTATE = -3
     }
 
     // ---- settings driven by the toolbar ----
     var tool = Tool.PEN
+        set(v) { field = v; exitEdit() }
     var penColor = 0xFF1F1F24.toInt()
     var penSize = 4f
     var hlColor = 0x66FFE14D
@@ -238,43 +245,8 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         }
         return null
     }
-    /** Draw, hold the pen still ~0.5 s, lift: a nearly straight stroke becomes a straight line. */
+    /** Draw, rest the pen ~0.4 s: the stroke turns into a straight line or a perfect shape while the pen is still down. */
     var snapLines = true
-
-    private fun straightened(st: Stroke): Stroke? {
-        val inputs = st.inputs; val n = inputs.size
-        if (n < 6) return null
-        val p = StrokeInput()
-        inputs.populate(n - 1, p)
-        val ex = p.x; val ey = p.y; val tEnd = p.elapsedTimeMillis
-        val r = 8 * d / s
-        var j = n - 1
-        while (j > 0) { inputs.populate(j - 1, p); if (kotlin.math.hypot(p.x - ex, p.y - ey) > r) break; j-- }
-        inputs.populate(j, p)
-        if (tEnd - p.elapsedTimeMillis < 450) return null
-        val x1 = p.x; val y1 = p.y
-        inputs.populate(0, p)
-        val x0 = p.x; val y0 = p.y; val t0 = p.elapsedTimeMillis
-        val len = kotlin.math.hypot(x1 - x0, y1 - y0)
-        if (len < 30 * d / s) return null
-        var maxDev = 0f; val pressures = ArrayList<Float>()
-        for (k in 0..j) {
-            inputs.populate(k, p)
-            val dev = kotlin.math.abs((y1 - y0) * p.x - (x1 - x0) * p.y + x1 * y0 - y1 * x0) / len
-            maxDev = maxOf(maxDev, dev); pressures.add(p.pressure)
-        }
-        if (maxDev > maxOf(0.07f * len, 10 * d / s)) return null
-        pressures.sort(); val pr = pressures[pressures.size / 2]
-        inputs.populate(0, p)
-        val tool = p.toolType; val unit = p.strokeUnitLengthCm; val tilt = p.tiltRadians; val ori = p.orientationRadians
-        val batch = MutableStrokeInputBatch(); val steps = 24
-        for (k in 0..steps) {
-            val f = k / steps.toFloat()
-            p.update(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f, t0 + k * 8L, tool, unit, pr, tilt, ori)
-            batch.add(p)
-        }
-        return Stroke(st.brush, batch.toImmutable())
-    }
 
     private fun onInput(e: MotionEvent): Boolean {
         val action = e.actionMasked
@@ -287,6 +259,8 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) pickSwallow = false
             return true
         }
+        // A shape showing handles: touches on a handle / its outline edit it; anything else hides them.
+        if ((editShape != null || dragStroke != null) && penPointer == -1 && handleEditTouch(e)) return true
         if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
             val idx = e.actionIndex
             val type = e.getToolType(idx)
@@ -311,8 +285,9 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
             gestureDetector.onTouchEvent(e)
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                 gesturing = false
-                if (action == MotionEvent.ACTION_UP && tapGestures && !tapMoved && e.eventTime - tapStart < 350) {
-                    if (tapMaxPointers == 2) undo() else if (tapMaxPointers == 3) redo()
+                if (action == MotionEvent.ACTION_UP && !tapMoved && e.eventTime - tapStart < 350) {
+                    if (tapMaxPointers == 1) selectShapeAt(tapX, tapY)          // tap a shape = show its handles
+                    else if (tapGestures && tapMaxPointers == 2) undo() else if (tapGestures && tapMaxPointers == 3) redo()
                 }
             }
         }
@@ -334,7 +309,13 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         erasing = tool == Tool.ERASER || button
         eraseFromTool = tool == Tool.ERASER && !button
         if (erasing) { erasedNow.clear(); addedNow.clear(); eraseAt(e.getX(idx), e.getY(idx)) }
-        else { predictor.record(e); currentId = ink.startStroke(e, penPointer, brush(), Matrix(inv), identity) }
+        else {
+            predictor.record(e)
+            val b = brush(); strokeBrush = b
+            currentId = ink.startStroke(e, penPointer, b, Matrix(inv), identity)
+            livePts.clear(); livePress.clear(); addLive(e.getX(idx), e.getY(idx), e.getPressure(idx))
+            armHold(e.getX(idx), e.getY(idx))
+        }
     }
 
     private fun penEvent(e: MotionEvent) {
@@ -364,8 +345,14 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                 if (erasing) {
                     for (h in 0 until e.historySize) eraseAt(e.getHistoricalX(idx, h), e.getHistoricalY(idx, h))
                     eraseAt(e.getX(idx), e.getY(idx))
+                } else if (live != null) {
+                    liveMove(e.getX(idx), e.getY(idx))          // snapped: the pen now shapes the shape
                 } else {
                     val id = currentId ?: return
+                    for (h in 0 until e.historySize) addLive(e.getHistoricalX(idx, h), e.getHistoricalY(idx, h), e.getHistoricalPressure(idx, h))
+                    addLive(e.getX(idx), e.getY(idx), e.getPressure(idx))
+                    // Restart the "pen is resting" timer whenever the pen really moves.
+                    if (kotlin.math.hypot(e.getX(idx) - holdX, e.getY(idx) - holdY) > 6 * d) armHold(e.getX(idx), e.getY(idx))
                     predictor.record(e)
                     val predicted = if (usePrediction) predictor.predict() else null
                     try { ink.addToStroke(e, penPointer, id, predicted) } finally { predicted?.recycle() }
@@ -380,6 +367,12 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     }
 
     private fun endPen(e: MotionEvent, canceled: Boolean) {
+        removeCallbacks(holdCheck)
+        if (live != null) {
+            if (canceled) cancelLive() else commitLive()
+            currentId = null; penPointer = -1
+            return
+        }
         if (erasing) {
             if (erasedNow.isNotEmpty() || addedNow.isNotEmpty()) push(Act.Edit(erasedNow.toList(), addedNow.toList()))
             erasedNow.clear(); addedNow.clear(); erasing = false
@@ -449,7 +442,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     }
 
     private fun commit(raw: Stroke) {
-        val st = (if (snapLines) runCatching { straightened(raw) }.getOrNull() else null) ?: raw
+        val st = raw
         strokes.add(st)
         val b = boundsOf(st)
         val lastPageTouched = floor((b.bottom - GAP) / (PAGE_H + GAP)).toInt()
@@ -508,7 +501,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     fun strokesSnapshot(): List<Stroke> = strokes.toList()
 
     fun load(list: List<Stroke>) {
-        strokes.clear(); bounds.clear(); undoS.clear(); redoS.clear()
+        exitEdit(); strokes.clear(); bounds.clear(); undoS.clear(); redoS.clear(); shapes.clear()
         strokes.addAll(list)
         var lastPage = 0
         for (st in list) lastPage = maxOf(lastPage, floor((boundsOf(st).bottom - GAP) / (PAGE_H + GAP)).toInt())
@@ -553,7 +546,8 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
             p.update(p.x, p.y + dy, p.elapsedTimeMillis, p.toolType, p.strokeUnitLengthCm, p.pressure, p.tiltRadians, p.orientationRadians)
             batch.add(p)
         }
-        return Stroke(st.brush, batch.toImmutable())
+        // A moved shape stays an editable shape.
+        return Stroke(st.brush, batch.toImmutable()).also { n -> shapes[st]?.let { shapes[n] = it.copy().apply { translate(0f, dy) } } }
     }
 
     /**
@@ -561,6 +555,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
      * [dropPage]: strokes on this page are removed. [copyPage]: strokes on it are copied onto copyPage + 1.
      */
     private fun pageEdit(newPages: Int, shiftFrom: Int, shift: Int, dropPage: Int = -1, copyPage: Int = -1) {
+        exitEdit()
         clearSelection()
         val step = PAGE_H + GAP
         val removed = mutableListOf<Pair<Stroke, Int>>(); val added = mutableListOf<Stroke>()
@@ -596,6 +591,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     }
 
     fun undo() {
+        exitEdit()
         clearSelection()
         val a = undoS.removeLastOrNull() ?: return
         when (a) {
@@ -612,6 +608,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     }
 
     fun redo() {
+        exitEdit()
         clearSelection()
         val a = redoS.removeLastOrNull() ?: return
         when (a) {
@@ -625,6 +622,385 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
             }
         }
         undoS.addLast(a); dirty = true; layer.invalidate(); onHistoryChanged?.invoke()
+    }
+
+    // ================= shapes: draw + hold = a perfect shape, then handles to edit it =================
+    /** Geometry of strokes that are snapped shapes (kept so they stay editable). */
+    private val shapes = IdentityHashMap<Stroke, Shape>()
+    private val livePts = ArrayList<Float>()      // page x,y of the stroke being drawn
+    private val livePress = ArrayList<Float>()
+    private var holdX = 0f; private var holdY = 0f
+    private var strokeBrush: Brush? = null
+    private val holdCheck = Runnable { trySnap() }
+    /** Page units per dp at the current zoom. */
+    private val u get() = d / s
+
+    /** The shape being shaped while the pen is still down (after the hold). */
+    private var live: Shape? = null
+    private var livePressure = 0.5f
+    /** The shape whose handles are shown after the pen lifted. */
+    private var editStroke: Stroke? = null
+    private var editShape: Shape? = null
+    /** Active handle index, or BODY (move) / ROTATE, during a live or edit drag. */
+    private var dragH = NO_DRAG
+    private var dragOffX = 0f; private var dragOffY = 0f
+    private var dragStartX = 0f; private var dragStartY = 0f
+    private var dragBase: Shape? = null
+    private var dragStroke: Stroke? = null           // non-null while an edit drag runs
+    private var dragIdx = -1
+    private var dragChanged = false
+    private var editPointer = -1
+    private var preview: Stroke? = null
+    /** Smart guides while dragging: page segments x1,y1,x2,y2, and a magnet ring. */
+    private val guides = ArrayList<Float>()
+    private var magnet: FloatArray? = null
+    private var targets: SnapTargets? = null
+
+    private class SnapTargets(
+        val xs: FloatArray,      // (x, y0, y1) triples: vertical alignment lines
+        val ys: FloatArray,      // (y, x0, x1) triples: horizontal alignment lines
+        val pts: FloatArray,     // magnet points
+        val lines: FloatArray,   // straight edges for "parallel" guides
+    )
+
+    private fun isInkTool() = tool == Tool.PEN || tool == Tool.FOUNTAIN || tool == Tool.PENCIL || tool == Tool.HIGHLIGHTER
+
+    private fun addLive(sx: Float, sy: Float, pr: Float) {
+        val w = toWorld(sx, sy); livePts.add(w[0]); livePts.add(w[1]); livePress.add(pr)
+    }
+
+    private fun armHold(sx: Float, sy: Float) {
+        holdX = sx; holdY = sy
+        removeCallbacks(holdCheck)
+        if (snapLines && isInkTool()) postDelayed(holdCheck, HOLD_MS)
+    }
+
+    /** The pen has rested: if the stroke so far looks like a shape, replace it by the perfect one. */
+    private fun trySnap() {
+        val id = currentId ?: return
+        if (penPointer == -1 || live != null || erasing || livePts.size < 12) return
+        val sh = ShapeRecognizer.recognize(livePts.toFloatArray(), u) ?: return
+        ink.cancelStroke(id); currentId = null
+        live = sh
+        livePressure = livePress.sorted().let { if (it.isEmpty()) 0.5f else it[it.size / 2] }.coerceIn(0.05f, 1f)
+        // The pen now holds the nearest handle: moving it changes that dimension until the pen lifts.
+        val px = livePts[livePts.size - 2]; val py = livePts[livePts.size - 1]
+        val hs = sh.handles(); var best = 0; var bd = Float.MAX_VALUE
+        for (k in 0 until hs.size / 2) { val dd = kotlin.math.hypot(hs[2 * k] - px, hs[2 * k + 1] - py); if (dd < bd) { bd = dd; best = k } }
+        dragH = best; dragOffX = hs[2 * best] - px; dragOffY = hs[2 * best + 1] - py
+        targets = collectTargets(null)
+        preview = strokeOf(sh, strokeBrush ?: brush(), livePressure)
+        performHapticFeedback(if (android.os.Build.VERSION.SDK_INT >= 30) android.view.HapticFeedbackConstants.CONFIRM
+            else android.view.HapticFeedbackConstants.VIRTUAL_KEY)
+        layer.invalidate()
+    }
+
+    private fun liveMove(sx: Float, sy: Float) {
+        val sh = live ?: return
+        val w = toWorld(sx, sy)
+        dragHandle(sh, dragH, w[0] + dragOffX, w[1] + dragOffY)
+        preview = strokeOf(sh, strokeBrush ?: brush(), livePressure)
+        layer.invalidate()
+    }
+
+    /** Pen lifted after a snap: the shape becomes a stroke and keeps its handles for editing. */
+    private fun commitLive() {
+        val sh = live ?: return
+        live = null; preview = null; guides.clear(); magnet = null; dragH = NO_DRAG
+        val st = strokeOf(sh, strokeBrush ?: brush(), livePressure)
+        if (st != null) {
+            strokes.add(st); shapes[st] = sh.copy()
+            growPagesFor(listOf(st)); push(Act.Add(st))
+            editStroke = st; editShape = sh
+        }
+        layer.invalidate()
+    }
+
+    private fun cancelLive() { live = null; preview = null; guides.clear(); magnet = null; dragH = NO_DRAG; layer.invalidate() }
+
+    /** Builds the ink stroke of a shape: its outline as inputs with one constant pressure. */
+    private fun strokeOf(sh: Shape, brush0: Brush, pressure: Float): Stroke? = runCatching {
+        // Same look as the pen, but without input smoothing: it bent the start of perfect circles.
+        val brush = Brush.createWithColorIntArgb(Families.exact(brush0.family), brush0.colorIntArgb, brush0.size, brush0.epsilon)
+        val o = sh.outline(4f)
+        val batch = MutableStrokeInputBatch(); val p = StrokeInput()
+        val unitCm = s / (resources.displayMetrics.xdpi / 2.54f)
+        for (k in 0 until o.size / 2) {
+            p.update(o[2 * k], o[2 * k + 1], k * 4L, InputToolType.STYLUS, unitCm, pressure)
+            batch.add(p)
+        }
+        Stroke(brush, batch.toImmutable())
+    }.getOrNull()
+
+    private fun pressureOf(st: Stroke): Float {
+        if (st.inputs.size == 0) return 0.5f
+        val p = StrokeInput(); st.inputs.populate(0, p)
+        return if (p.pressure.isNaN() || p.pressure < 0f) 0.5f else p.pressure
+    }
+
+    // ---------------- edit mode ----------------
+    /** Touches while a shape shows its handles. Returns true when the touch was used for editing. */
+    private fun handleEditTouch(e: MotionEvent): Boolean {
+        val action = e.actionMasked
+        if (dragStroke != null) {
+            val idx = e.findPointerIndex(editPointer)
+            when (action) {
+                MotionEvent.ACTION_MOVE -> if (idx >= 0) editMove(e.getX(idx), e.getY(idx))
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> if (e.getPointerId(e.actionIndex) == editPointer) editEnd()
+                MotionEvent.ACTION_CANCEL -> editEnd()
+            }
+            return true
+        }
+        if (action == MotionEvent.ACTION_DOWN && editShape != null) {
+            val h = hitTest(e.x, e.y)
+            if (h != NO_DRAG) { editPointer = e.getPointerId(0); editBegin(h, e.x, e.y); return true }
+            exitEdit()
+        }
+        return false
+    }
+
+    private fun screen(p: FloatArray) = p.copyOf().also { m.mapPoints(it) }
+
+    private fun rotHandle(sh: Shape): FloatArray {
+        val r = RectF(sh.bounds()); m.mapRect(r)
+        return floatArrayOf(r.centerX(), r.bottom + 36 * d)
+    }
+
+    private fun hitTest(sx: Float, sy: Float): Int {
+        val sh = editShape ?: return NO_DRAG
+        val hs = screen(sh.handles())
+        var best = NO_DRAG; var bd = 26 * d
+        for (k in 0 until hs.size / 2) { val dd = kotlin.math.hypot(hs[2 * k] - sx, hs[2 * k + 1] - sy); if (dd < bd) { bd = dd; best = k } }
+        if (best != NO_DRAG) return best
+        if (sh.rotatable) { val r = rotHandle(sh); if (kotlin.math.hypot(r[0] - sx, r[1] - sy) < 26 * d) return ROTATE }
+        val o = screen(sh.outline(6f))
+        var i = 0
+        while (i + 3 < o.size) { if (segDist(sx, sy, o[i], o[i + 1], o[i + 2], o[i + 3]) < 18 * d) return BODY; i += 2 }
+        return NO_DRAG
+    }
+
+    private fun segDist(x: Float, y: Float, x0: Float, y0: Float, x1: Float, y1: Float): Float {
+        val dx = x1 - x0; val dy = y1 - y0; val l2 = dx * dx + dy * dy
+        val t = if (l2 < 1e-6f) 0f else (((x - x0) * dx + (y - y0) * dy) / l2).coerceIn(0f, 1f)
+        return kotlin.math.hypot(x - (x0 + t * dx), y - (y0 + t * dy))
+    }
+
+    private fun editBegin(h: Int, sx: Float, sy: Float) {
+        val st = editStroke ?: return; val sh = editShape ?: return
+        dragIdx = strokes.indexOf(st)
+        if (dragIdx < 0) { exitEdit(); return }
+        dragStroke = st; dragBase = sh.copy(); dragH = h; dragChanged = false
+        val w = toWorld(sx, sy); dragStartX = w[0]; dragStartY = w[1]
+        if (h >= 0) { val hs = sh.handles(); dragOffX = hs[2 * h] - w[0]; dragOffY = hs[2 * h + 1] - w[1] }
+        targets = collectTargets(st)
+        layer.invalidate()
+    }
+
+    private fun editMove(sx: Float, sy: Float) {
+        val base = dragBase ?: return; val from = dragStroke ?: return
+        val w = toWorld(sx, sy)
+        val sh = base.copy()
+        guides.clear(); magnet = null
+        when (dragH) {
+            BODY -> { val t = snapTranslate(sh, w[0] - dragStartX, w[1] - dragStartY); sh.translate(t[0], t[1]) }
+            ROTATE -> {
+                val c = base.center()
+                var a = kotlin.math.atan2(w[1] - c[1], w[0] - c[0]) - kotlin.math.atan2(dragStartY - c[1], dragStartX - c[0])
+                val step = (Math.PI / 12).toFloat()                      // 15° steps snap within 2.5°
+                val k = kotlin.math.round(a / step); if (kotlin.math.abs(a - k * step) < 0.044f) a = k * step
+                sh.rotate(a, c[0], c[1])
+            }
+            else -> dragHandle(sh, dragH, w[0] + dragOffX, w[1] + dragOffY)
+        }
+        val st = strokeOf(sh, from.brush, pressureOf(from)) ?: return
+        if (dragIdx in strokes.indices) strokes[dragIdx] = st
+        editStroke = st; editShape = sh; dragChanged = true
+        layer.invalidate()
+    }
+
+    private fun editEnd() {
+        val from = dragStroke
+        if (from != null && dragChanged) {
+            val st = editStroke!!
+            shapes[st] = editShape!!.copy()
+            push(Act.Edit(listOf(from to dragIdx), listOf(st)))
+            growPagesFor(listOf(st))
+        }
+        dragStroke = null; dragBase = null; dragH = NO_DRAG; dragChanged = false; editPointer = -1
+        guides.clear(); magnet = null
+        layer.invalidate()
+    }
+
+    /** A finger tap on a shape's outline brings its handles back, so older shapes can be edited too. */
+    private fun selectShapeAt(sx: Float, sy: Float): Boolean {
+        for (k in strokes.indices.reversed()) {
+            val st = strokes[k]; val sh = shapes[st] ?: continue
+            val o = screen(sh.outline(6f))
+            var i = 0
+            while (i + 3 < o.size) {
+                if (segDist(sx, sy, o[i], o[i + 1], o[i + 2], o[i + 3]) < 16 * d) {
+                    editStroke = st; editShape = sh.copy(); layer.invalidate(); return true
+                }
+                i += 2
+            }
+        }
+        return false
+    }
+
+    /** Hides the shape handles (another touch, tool change, undo ...). */
+    fun exitEdit() {
+        if (dragStroke != null) editEnd()
+        if (editShape == null && editStroke == null) return
+        editStroke = null; editShape = null; layer.invalidate()
+    }
+
+    // ---------------- smart guides ----------------
+    /** Moves one handle, snapping to nearby points, alignments and (for lines) angles. */
+    private fun dragHandle(sh: Shape, i: Int, x0: Float, y0: Float) {
+        guides.clear(); magnet = null
+        // 1) a magnet point wins, 2) for lines an angle (level, upright, 45°, parallel), 3) else alignment.
+        magnetPoint(x0, y0)?.let { magnet = it; sh.moveHandle(i, it[0], it[1]); return }
+        if (sh is LineShape) angleSnap(sh, i, x0, y0)?.let { sh.moveHandle(i, it[0], it[1]); return }
+        val p = snapPoint(x0, y0)
+        sh.moveHandle(i, p[0], p[1])
+    }
+
+    /** Line end rotated onto a level / upright / diagonal / parallel direction when close; null if none. */
+    private fun angleSnap(sh: LineShape, i: Int, x0: Float, y0: Float): FloatArray? {
+        var x = x0; var y = y0
+        run {
+            val fx = if (i == 0) sh.x2 else sh.x1; val fy = if (i == 0) sh.y2 else sh.y1
+            val a = kotlin.math.atan2(y - fy, x - fx); val len = kotlin.math.hypot(x - fx, y - fy)
+            var bestA = Float.NaN; var bestD = 0.06f                 // ~3.5°
+            val q = (Math.PI / 4).toFloat()
+            val k = kotlin.math.round(a / q); if (kotlin.math.abs(a - k * q) < bestD) { bestD = kotlin.math.abs(a - k * q); bestA = k * q }
+            var parallel: Int = -1
+            val ls = targets?.lines ?: FloatArray(0)
+            var j = 0
+            while (j < ls.size) {
+                var la = kotlin.math.atan2(ls[j + 3] - ls[j + 1], ls[j + 2] - ls[j])
+                var dd = a - la
+                while (dd > Math.PI / 2) { dd -= Math.PI.toFloat(); la += Math.PI.toFloat() }
+                while (dd < -Math.PI / 2) { dd += Math.PI.toFloat(); la -= Math.PI.toFloat() }
+                if (kotlin.math.abs(dd) < 0.05f && kotlin.math.abs(dd) < bestD) { bestD = kotlin.math.abs(dd); bestA = la; parallel = j }
+                j += 4
+            }
+            if (bestA.isNaN()) return null
+            x = fx + len * kotlin.math.cos(bestA); y = fy + len * kotlin.math.sin(bestA)
+            if (parallel >= 0) { for (t in 0 until 4) guides.add(ls[parallel + t]); guides.add(fx); guides.add(fy); guides.add(x); guides.add(y) }
+            else {   // level / upright / diagonal: a guide through the line, across the page
+                val ext = 3000f
+                clipToPage(fx - ext * kotlin.math.cos(bestA), fy - ext * kotlin.math.sin(bestA),
+                    fx + ext * kotlin.math.cos(bestA), fy + ext * kotlin.math.sin(bestA))?.let { for (v in it) guides.add(v) }
+            }
+        }
+        return floatArrayOf(x, y)
+    }
+
+    /** The part of a segment inside the current page (Liang–Barsky), or null. */
+    private fun clipToPage(x1: Float, y1: Float, x2: Float, y2: Float): FloatArray? {
+        val top = pageTop(currentPage())
+        var t0 = 0f; var t1 = 1f
+        val dx = x2 - x1; val dy = y2 - y1
+        val p = floatArrayOf(-dx, dx, -dy, dy)
+        val q = floatArrayOf(x1 - 0f, PAGE_W - x1, y1 - top, top + PAGE_H - y1)
+        for (k in 0 until 4) {
+            if (p[k] == 0f) { if (q[k] < 0) return null; continue }
+            val r = q[k] / p[k]
+            if (p[k] < 0) { if (r > t1) return null; if (r > t0) t0 = r } else { if (r < t0) return null; if (r < t1) t1 = r }
+        }
+        return floatArrayOf(x1 + t0 * dx, y1 + t0 * dy, x1 + t1 * dx, y1 + t1 * dy)
+    }
+
+    /** The nearest magnet point (another shape's corner, end, centre ...) within reach, or null. */
+    private fun magnetPoint(x: Float, y: Float): FloatArray? {
+        val t = targets ?: return null
+        var best = -1; var bd = 12 * u
+        for (k in 0 until t.pts.size / 2) { val dd = kotlin.math.hypot(t.pts[2 * k] - x, t.pts[2 * k + 1] - y); if (dd < bd) { bd = dd; best = k } }
+        return if (best >= 0) floatArrayOf(t.pts[2 * best], t.pts[2 * best + 1]) else null
+    }
+
+    /** Lines a point up with other things' edges and centres (vertical / horizontal guides). */
+    private fun snapPoint(x: Float, y: Float): FloatArray {
+        val t = targets ?: return floatArrayOf(x, y)
+        var rx = x; var ry = y
+        val tol = 7 * u
+        var bx = -1; var bdx = tol
+        for (k in 0 until t.xs.size / 3) { val dd = kotlin.math.abs(t.xs[3 * k] - x); if (dd < bdx) { bdx = dd; bx = k } }
+        if (bx >= 0) { rx = t.xs[3 * bx]; guides.add(rx); guides.add(min(y, t.xs[3 * bx + 1])); guides.add(rx); guides.add(kotlin.math.max(y, t.xs[3 * bx + 2])) }
+        var by = -1; var bdy = tol
+        for (k in 0 until t.ys.size / 3) { val dd = kotlin.math.abs(t.ys[3 * k] - y); if (dd < bdy) { bdy = dd; by = k } }
+        if (by >= 0) { ry = t.ys[3 * by]; guides.add(min(x, t.ys[3 * by + 1])); guides.add(ry); guides.add(kotlin.math.max(x, t.ys[3 * by + 2])); guides.add(ry) }
+        return floatArrayOf(rx, ry)
+    }
+
+    /** Snaps a whole-shape move: its points to other points, else its edges / centre to other things'. */
+    private fun snapTranslate(sh: Shape, dx0: Float, dy0: Float): FloatArray {
+        val t = targets ?: return floatArrayOf(dx0, dy0)
+        val kp = sh.keyPoints()
+        var bd = 10 * u; var mdx = 0f; var mdy = 0f; var hit = false
+        for (k in 0 until kp.size / 2) {
+            val px = kp[2 * k] + dx0; val py = kp[2 * k + 1] + dy0
+            for (j in 0 until t.pts.size / 2) {
+                val dd = kotlin.math.hypot(t.pts[2 * j] - px, t.pts[2 * j + 1] - py)
+                if (dd < bd) { bd = dd; mdx = t.pts[2 * j] - px; mdy = t.pts[2 * j + 1] - py; hit = true; magnet = floatArrayOf(t.pts[2 * j], t.pts[2 * j + 1]) }
+            }
+        }
+        if (hit) return floatArrayOf(dx0 + mdx, dy0 + mdy)
+        val b = sh.bounds(); b.offset(dx0, dy0)
+        var dx = dx0; var dy = dy0
+        val tol = 7 * u
+        var bestX = tol; var gx = -1; var gxv = 0f
+        for (v in floatArrayOf(b.left, b.centerX(), b.right)) for (k in 0 until t.xs.size / 3) {
+            val dd = t.xs[3 * k] - v; if (kotlin.math.abs(dd) < bestX) { bestX = kotlin.math.abs(dd); gx = k; gxv = dd }
+        }
+        if (gx >= 0) { dx += gxv; val x = t.xs[3 * gx]; guides.add(x); guides.add(min(b.top, t.xs[3 * gx + 1])); guides.add(x); guides.add(kotlin.math.max(b.bottom, t.xs[3 * gx + 2])) }
+        var bestY = tol; var gy = -1; var gyv = 0f
+        for (v in floatArrayOf(b.top, b.centerY(), b.bottom)) for (k in 0 until t.ys.size / 3) {
+            val dd = t.ys[3 * k] - v; if (kotlin.math.abs(dd) < bestY) { bestY = kotlin.math.abs(dd); gy = k; gyv = dd }
+        }
+        if (gy >= 0) { dy += gyv; val y = t.ys[3 * gy]; guides.add(min(b.left, t.ys[3 * gy + 1])); guides.add(y); guides.add(kotlin.math.max(b.right, t.ys[3 * gy + 2])); guides.add(y) }
+        return floatArrayOf(dx, dy)
+    }
+
+    /** What the moving shape can line up with: other strokes on screen, other shapes' points and edges, the page centre. */
+    private fun collectTargets(exclude: Stroke?): SnapTargets {
+        val xs = ArrayList<Float>(); val ys = ArrayList<Float>(); val pts = ArrayList<Float>(); val lines = ArrayList<Float>()
+        val visTop = (0f - ty) / s; val visBottom = (height - ty) / s
+        fun box(r: RectF) {
+            for (x in floatArrayOf(r.left, r.centerX(), r.right)) { xs += x; xs += r.top; xs += r.bottom }
+            for (y in floatArrayOf(r.top, r.centerY(), r.bottom)) { ys += y; ys += r.left; ys += r.right }
+        }
+        for (st in strokes) {
+            if (st === exclude) continue
+            val b = boundsOf(st)
+            if (b.bottom < visTop || b.top > visBottom) continue
+            val sh = shapes[st]
+            if (sh != null) { pts.addAll(sh.keyPoints().toList()); lines.addAll(sh.edges().toList()); box(sh.bounds()) } else box(b)
+        }
+        val top = pageTop(currentPage())
+        xs += PAGE_W / 2; xs += top; xs += top + PAGE_H
+        return SnapTargets(xs.toFloatArray(), ys.toFloatArray(), pts.toFloatArray(), lines.toFloatArray())
+    }
+
+    // ---------------- persistence ----------------
+    /** Shapes as JSON keyed by stroke index (stored beside ink.bin). */
+    fun shapesJson(): String {
+        val a = org.json.JSONArray()
+        for ((i, st) in strokes.withIndex()) shapes[st]?.let { a.put(it.toJson().put("i", i)) }
+        return a.toString()
+    }
+
+    fun restoreShapes(json: String?) {
+        shapes.clear()
+        if (json.isNullOrEmpty()) return
+        runCatching {
+            val a = org.json.JSONArray(json)
+            for (k in 0 until a.length()) {
+                val o = a.getJSONObject(k); val i = o.getInt("i")
+                if (i in strokes.indices) Shape.fromJson(o)?.let { shapes[strokes[i]] = it }
+            }
+        }
     }
 
     // ================= lasso selection =================
@@ -691,7 +1067,8 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                 updateSelBounds()
             }
             Drag.MOVE, Drag.RESIZE -> if (selDx != 0f || selDy != 0f || selK != 1f) {
-                replaceSelection { st -> transformed(st, selBounds.left, selBounds.top, selK, selDx, selDy) }
+                val ax = selBounds.left; val ay = selBounds.top; val k = selK; val dx = selDx; val dy = selDy
+                replaceSelection({ st -> transformed(st, ax, ay, k, dx, dy) }) { sh -> sh.transform(ax, ay, k, dx, dy) }
             }
             Drag.NONE -> {}
         }
@@ -728,12 +1105,15 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     }
 
     /** Replaces every selected stroke by f(stroke), as one undoable step; the new strokes stay selected. */
-    private fun replaceSelection(f: (Stroke) -> Stroke) {
+    private fun replaceSelection(f: (Stroke) -> Stroke, g: (Shape) -> Unit = {}) {
         val removed = mutableListOf<Pair<Stroke, Int>>(); val added = mutableListOf<Stroke>()
         for (st in selection) { val k = strokes.indexOf(st); if (k >= 0) removed += st to k }
         removed.sortBy { it.second }
         for (r in removed.asReversed()) strokes.removeAt(r.second)
-        for (r in removed) added += f(r.first)
+        for (r in removed) {
+            val n = f(r.first); added += n
+            shapes[r.first]?.let { sh -> shapes[n] = sh.copy().also(g) }   // shapes stay editable after a move / recolour
+        }
         strokes.addAll(added)
         selection.clear(); selection.addAll(added); updateSelBounds()
         growPagesFor(added)
@@ -761,17 +1141,19 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
 
     fun duplicateSelection() {
         val off = 40f
-        val copies = selection.map { transformed(it, 0f, 0f, 1f, off, off) }
+        val copies = selection.map { st ->
+            transformed(st, 0f, 0f, 1f, off, off).also { n -> shapes[st]?.let { shapes[n] = it.copy().apply { translate(off, off) } } }
+        }
         strokes.addAll(copies); growPagesFor(copies)
         push(Act.Edit(emptyList(), copies))
         selection.clear(); selection.addAll(copies); updateSelBounds(); layer.invalidate(); notifySelection()
     }
 
     /** Recolours the selection; highlighter strokes keep their transparency. */
-    fun recolorSelection(color: Int) = replaceSelection { st ->
+    fun recolorSelection(color: Int) = replaceSelection({ st ->
         val c = if (st.brush.family == Families.highlighter) (HL_ALPHA shl 24) or (color and 0xFFFFFF) else color
         transformed(st, 0f, 0f, 1f, 0f, 0f, c)
-    }
+    })
 
     private fun notifySelection(hideMenu: Boolean = false) {
         if (selection.isEmpty() || hideMenu) { onSelectionChanged?.invoke(null); return }
@@ -790,6 +1172,65 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         private val selPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = ACCENT }
         private val handlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
         private val lassoPath = android.graphics.Path()
+
+        // ---- shape editing overlay (drawn in screen pixels so handles keep their size at any zoom) ----
+        private val guidePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE; color = 0xFFE0338C.toInt(); strokeWidth = 1.3f * d
+            pathEffect = android.graphics.DashPathEffect(floatArrayOf(6 * d, 4 * d), 0f)
+        }
+        private val axisPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = ACCENT; strokeWidth = 1.3f * d }
+        private val axisDash = android.graphics.DashPathEffect(floatArrayOf(5 * d, 4 * d), 0f)
+        private val hFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+        private val hEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = ACCENT; strokeWidth = 2f * d }
+        private val hActive = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = ACCENT }
+        private val rotEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = 0xFFCBD2DC.toInt(); strokeWidth = 1.2f * d }
+        private val rotIcon = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE; color = ICON; strokeWidth = 1.8f * d; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
+        }
+        private val pillBg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xE61C1F26.toInt() }
+        private val pillText = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = 13 * d; textAlign = Paint.Align.CENTER }
+        private val tmpPath = android.graphics.Path()
+
+        private fun drawShapeUi(c: Canvas) {
+            // Smart guides and the magnet ring.
+            var i = 0
+            val g = FloatArray(4)
+            while (i + 3 < guides.size) {
+                g[0] = guides[i]; g[1] = guides[i + 1]; g[2] = guides[i + 2]; g[3] = guides[i + 3]; m.mapPoints(g)
+                c.drawLine(g[0], g[1], g[2], g[3], guidePaint); i += 4
+            }
+            magnet?.let { val p = it.copyOf(); m.mapPoints(p); c.drawCircle(p[0], p[1], 10 * d, hEdge) }
+            val sh = live ?: editShape ?: return
+            // Axes / diagonals: dashed, solid once the shape is perfect (circle, square).
+            val ind = screen(sh.indicators())
+            axisPaint.pathEffect = if (sh.perfect) null else axisDash
+            i = 0
+            while (i + 3 < ind.size) { c.drawLine(ind[i], ind[i + 1], ind[i + 2], ind[i + 3], axisPaint); i += 4 }
+            val hs = screen(sh.handles())
+            for (k in 0 until hs.size / 2) {
+                val r = if (sh is RectShape && k >= 4) 5.5f * d else 7f * d
+                if (k == dragH) c.drawCircle(hs[2 * k], hs[2 * k + 1], r + 1.5f * d, hActive)
+                else { c.drawCircle(hs[2 * k], hs[2 * k + 1], r, hFill); c.drawCircle(hs[2 * k], hs[2 * k + 1], r, hEdge) }
+            }
+            if (live == null && sh.rotatable) {   // rotate handle under the shape
+                val r = rotHandle(sh)
+                c.drawCircle(r[0], r[1], 14 * d, hFill); c.drawCircle(r[0], r[1], 14 * d, rotEdge)
+                val rr = 6 * d
+                tmpPath.reset(); tmpPath.addArc(r[0] - rr, r[1] - rr, r[0] + rr, r[1] + rr, -60f, 290f)
+                c.drawPath(tmpPath, rotIcon)
+                val ax = r[0] + rr * kotlin.math.cos(Math.toRadians(-60.0)).toFloat(); val ay = r[1] + rr * kotlin.math.sin(Math.toRadians(-60.0)).toFloat()
+                c.drawLine(ax, ay, ax - 3.5f * d, ay - 0.5f * d, rotIcon); c.drawLine(ax, ay, ax + 0.5f * d, ay - 3.8f * d, rotIcon)
+            }
+            // Name of the recognised shape, above it.
+            val b = RectF(sh.bounds()); m.mapRect(b)
+            val label = sh.name
+            val tw = pillText.measureText(label) + 20 * d; val th = 26 * d
+            var top = b.top - th - 14 * d
+            if (top < topInset) top = b.bottom + 14 * d + if (live == null && sh.rotatable) 44 * d else 0f
+            val lx = b.centerX()
+            c.drawRoundRect(lx - tw / 2, top, lx + tw / 2, top + th, th / 2, th / 2, pillBg)
+            c.drawText(label, lx, top + th / 2 + 4.5f * d, pillText)
+        }
 
         override fun onDraw(c: Canvas) {
             val visTop = (0f - ty) / s; val visBottom = (height - ty) / s
@@ -811,6 +1252,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                 if (moving && st in selection) continue
                 renderer.draw(c, st, m)
             }
+            preview?.let { renderer.draw(c, it, m) }   // the snapped shape while the pen is still down
             if (selection.isNotEmpty()) {
                 val t = Matrix().apply { setScale(selK, selK, selBounds.left, selBounds.top); postTranslate(selDx, selDy) }
                 if (moving) {
@@ -839,6 +1281,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                 c.drawPath(lassoPath, selPaint)
             }
             c.restore()
+            drawShapeUi(c)
         }
 
         fun drawPattern(c: Canvas, p: RectF) {

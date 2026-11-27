@@ -187,6 +187,7 @@ class MainActivity : Activity() {
         runCatching { canvas.paper = NoteCanvasView.Paper.valueOf(meta.paper) }
         if (meta.paperColor != -1) canvas.paperColor = meta.paperColor
         canvas.load(store.loadStrokes(meta.id))
+        canvas.restoreShapes(store.loadShapes(meta.id))
         canvas.restorePages(meta.pages, meta.bookmarks)
         meta.opened = System.currentTimeMillis(); store.saveMeta(meta)
 
@@ -266,7 +267,7 @@ class MainActivity : Activity() {
         meta.modified = System.currentTimeMillis()
         meta.paper = canvas.paper.name; meta.paperColor = canvas.paperColor
         meta.pages = canvas.pages; meta.bookmarks = canvas.bookmarks.toList()
-        if (canvas.dirty) store.saveStrokes(meta.id, canvas.strokesSnapshot())
+        if (canvas.dirty) { store.saveStrokes(meta.id, canvas.strokesSnapshot()); store.saveShapes(meta.id, canvas.shapesJson()) }
         store.saveMeta(meta)
         store.saveThumbnail(meta.id, canvas.renderThumbnail(360))
         canvas.markSaved(); metaDirty = false
@@ -623,7 +624,7 @@ class MainActivity : Activity() {
         showMenu(anchor, listOf(
             MenuItem("שינוי שם…") { renameDialog() },
             MenuItem("תבנית נייר…") { showPaperDialog() },
-            MenuItem("קו ישר בהחזקת העט", checked = p.snapLines, separatorBefore = true) { p.snapLines = !p.snapLines; applyPrefs() },
+            MenuItem("צורות בהחזקת העט", checked = p.snapLines, separatorBefore = true) { p.snapLines = !p.snapLines; applyPrefs() },
             MenuItem("חזרה אוטומטית מהמחק", checked = p.autoDeselectEraser) { p.autoDeselectEraser = !p.autoDeselectEraser; applyPrefs() },
             MenuItem("אצבע כותבת", checked = p.fingerDraws) { p.fingerDraws = !p.fingerDraws; applyPrefs() },
             MenuItem("סרגל כלים קבוע", checked = p.dockedToolbar) { p.dockedToolbar = !p.dockedToolbar; applyPrefs() },

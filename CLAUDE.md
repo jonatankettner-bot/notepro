@@ -92,6 +92,17 @@ drive it with `adb shell input tap/stylus swipe`, and check screens with `adb ex
   (`@ExperimentalInkCustomBrushApi`): dotted = particle tip, fountain = flat nib at 45°, pencil = pressure
   opacity + noise, rainbow = hue offset by distance, glitter = extra sparkle coat, stabilization =
   `SlidingWindowModel`. Codes 0..3 are the old ones, so old notes load unchanged.
+- `Shapes.kt` — draw + rest the pen ~0.4 s = shape snapping (owner's spec, 2026-11-27):
+  `ShapeRecognizer` turns the stroke into a line / broken line / circle / ellipse / square / rectangle /
+  equilateral, isosceles or right triangle / (isosceles) trapezoid / parallelogram / regular 5–8-gon / free
+  polygon, preferring the "perfect" variant when close. Arcs and curves stay freehand. While the pen is
+  still down it drags the nearest handle (ellipse axis, rectangle corner, line end ...); circle / square
+  snap and their guide lines turn solid. After lifting, the shape keeps handles: drag a handle, drag the
+  outline to move, rotate with the ↻ handle; a finger tap on any shape brings its handles back.
+  Smart guides (NoteCanvasView "smart guides"): magnet to other shapes' points, align with other strokes'
+  edges / centres and the page centre, level / upright / 45° / parallel lines (pink dashed guides).
+  Shapes are saved in notes/<id>/shapes.json keyed by stroke index. Shape strokes use
+  `Families.exact()` (no input smoothing — it bent the start of perfect circles).
 - `Ui.kt` — shared UI: `showMenu` (our own RTL popup menu; use it instead of PopupMenu, which lays out
   left-to-right on an English-language device), `pressable` ripple background, `Switch.accent()`,
   `AspectImageView`, `relativeDate`.

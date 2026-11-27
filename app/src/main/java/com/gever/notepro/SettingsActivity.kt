@@ -53,7 +53,7 @@ class SettingsActivity : Activity() {
         section("כתיבה וכלים", listOf(
             Triple("עט רגיש ללחץ", "העובי משתנה לפי עוצמת הלחיצה", prefs::usePressure),
             Triple("חיזוי תנועה", "מקטין את ההשהיה בין העט לקו", prefs::usePrediction),
-            Triple("קו ישר בהחזקת העט", "צייר קו, החזק את העט חצי שנייה והרם", prefs::snapLines),
+            Triple("צורות בהחזקת העט", "מציירים קו, עיגול, מלבן, משולש ועוד ועוצרים רגע: הצורה מתיישרת, ואפשר עוד לכוון אותה לפני ההרמה", prefs::snapLines),
             Triple("חזרה אוטומטית מהמחק", "אחרי מחיקה חוזרים לכלי הקודם", prefs::autoDeselectEraser),
             Triple("אצבע כותבת", "כבוי: רק העט כותב, האצבע גוללת ומגדילה", prefs::fingerDraws),
         ))

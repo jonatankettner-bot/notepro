@@ -105,6 +105,15 @@ class NoteStore(ctx: Context) {
         saveMeta(m); return m
     }
 
+    /** Geometry of the note's snapped shapes (JSON, keyed by stroke index), so they stay editable. */
+    fun loadShapes(id: String): String? = File(File(notesDir, id), "shapes.json").takeIf { it.exists() }?.readText()
+
+    fun saveShapes(id: String, json: String) {
+        val f = File(File(notesDir, id).apply { mkdirs() }, "shapes.json")
+        val tmp = File(f.path + ".tmp"); tmp.writeText(json)
+        if (!tmp.renameTo(f)) { f.delete(); tmp.renameTo(f) }
+    }
+
     fun thumbnail(id: String): Bitmap? {
         val f = File(File(notesDir, id), "thumb.png")
         return if (f.exists()) BitmapFactory.decodeFile(f.path) else null

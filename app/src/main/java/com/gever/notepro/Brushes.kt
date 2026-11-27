@@ -63,6 +63,15 @@ object Families {
         return remember(c, built)
     }
 
+    /** High-nibble value meaning "exact geometry": no input smoothing (used for snapped shapes). */
+    private const val EXACT = 15
+
+    /**
+     * The same brush family without input smoothing. The normal smoothing lags behind at the start of a
+     * stroke, which bent the beginning of perfect circles; shapes must follow their outline exactly.
+     */
+    fun exact(f: BrushFamily): BrushFamily = of(((codes[f] ?: 0) and 0xF) or (EXACT shl 4))
+
     /** Code for the regular pen with the given style; [stab] is 0..10 (stabilization 0.0..1.0). */
     fun penCode(type: PenType, effect: PenEffect, stab: Int): Int {
         val t = type.ordinal
@@ -83,7 +92,11 @@ object Families {
             else -> pen
         }
         // Stabilization = the library's sliding-window input smoothing; stronger = longer window.
-        return if (stab > 0) base.toBuilder().setInputModel(BrushFamily.SlidingWindowModel(stab * 15L, 180)).build() else base
+        return when {
+            stab == EXACT -> base.toBuilder().setInputModel(BrushFamily.EXPERIMENTAL_NAIVE_MODEL).build()
+            stab > 0 -> base.toBuilder().setInputModel(BrushFamily.SlidingWindowModel(stab * 15L, 180)).build()
+            else -> base
+        }
     }
 
     // ---------- building blocks ----------
