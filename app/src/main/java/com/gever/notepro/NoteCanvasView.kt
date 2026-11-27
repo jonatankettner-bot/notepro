@@ -69,9 +69,14 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     var eraserMode = EraserMode.WHOLE
     /** Eraser radius in screen dp (independent of zoom). */
     var eraserRadiusDp = 12f
-    /** Screen pixels kept free at the top for the floating toolbar when scrolled to the start. */
+    /** Screen y where the first page's top edge sits when scrolled to the start (below the toolbar). */
     var topInset = 0f
-        set(v) { field = v; if (width > 0) clampAndApply() }
+        set(v) {
+            val atStart = width == 0 || ty >= maxTy() - 1f
+            field = v
+            if (atStart) ty = maxTy()
+            if (width > 0) clampAndApply()
+        }
     /** Screen pixels kept free on each side at the fit zoom (room for the side rail). */
     var sideInset = 16f
     var onHistoryChanged: (() -> Unit)? = null
@@ -154,6 +159,8 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
 
     // ================= geometry =================
     private fun pageTop(i: Int) = GAP + i * (PAGE_H + GAP)
+    /** Largest allowed ty: the first page's top edge exactly at [topInset]. */
+    private fun maxTy() = topInset - GAP * s
     private fun docHeight() = GAP + pages * (PAGE_H + GAP)
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -164,7 +171,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         fitScale = pageScreenW / PAGE_W
         s = fitScale
         tx = (w - PAGE_W * s) / 2f
-        ty = -worldTop * s
+        ty = if (oldw == 0) maxTy() else -worldTop * s
         clampAndApply()
     }
 
@@ -172,8 +179,8 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         val w = width.toFloat(); val h = height.toFloat()
         val docW = PAGE_W * s; val docH = docHeight() * s; val pad = 16 * d
         tx = if (docW <= w) (w - docW) / 2f else tx.coerceIn(w - docW - pad, pad)
-        val avail = h - topInset
-        ty = if (docH <= avail) topInset else ty.coerceIn(h - docH, topInset)
+        val top = maxTy()
+        ty = if (docH <= h - top) top else ty.coerceIn(h - docH, top)
         m.setScale(s, s); m.postTranslate(tx, ty); m.invert(inv)
         layer.invalidate()
         reportPage()
@@ -378,8 +385,9 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
             val docW = (PAGE_W * s).toInt(); val docH = (docHeight() * s).toInt(); val pad = (16 * d).toInt()
             val minX = if (docW <= w) tx.toInt() else w - docW - pad
             val maxX = if (docW <= w) tx.toInt() else pad
-            val minY = if (docH <= h) 0 else h - docH
-            scroller.fling(tx.toInt(), ty.toInt(), vx.toInt(), vy.toInt(), minX, maxX, minY, 0)
+            val maxY = maxTy().toInt()
+            val minY = if (docH <= h - maxY) maxY else h - docH
+            scroller.fling(tx.toInt(), ty.toInt(), vx.toInt(), vy.toInt(), minX, maxX, minY, maxY)
             postOnAnimation(flingStep)
             return true
         }
@@ -496,7 +504,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
 
     fun scrollToPage(i: Int) {
         scroller.forceFinished(true)
-        ty = topInset - (pageTop(i) - GAP / 2) * s
+        ty = topInset - pageTop(i) * s
         clampAndApply()
     }
 

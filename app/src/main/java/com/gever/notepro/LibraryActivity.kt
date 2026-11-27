@@ -62,7 +62,12 @@ class LibraryActivity : Activity() {
     private lateinit var sideList: LinearLayout
     private lateinit var heading: TextView
     private lateinit var grid: GridView
-    private lateinit var empty: TextView
+    private lateinit var empty: LinearLayout
+    private lateinit var emptyTitle: TextView
+    private lateinit var emptySub: TextView
+    private lateinit var emptyBtn: TextView
+    private lateinit var countLine: TextView
+    private lateinit var emptyIcon: ImageView
     private lateinit var updateChip: TextView
     private var pending: Updater.Release? = null
     private val adapter = CardAdapter()
@@ -102,31 +107,49 @@ class LibraryActivity : Activity() {
             orientation = LinearLayout.VERTICAL; setBackgroundColor(SIDEBAR_BG)
             setPadding(dp(12), dp(16), dp(12), dp(12))
         }
-        col.addView(TextView(this).apply {
-            text = "NotePro"; textSize = 22f; setTextColor(INK)
+        // App mark + name. VIEW_START keeps the Latin name on the right in the right-to-left sidebar.
+        val brand = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(dp(8), 0, dp(8), dp(14)) }
+        brand.addView(FrameLayout(this).apply {
+            background = rounded(ACCENT, 9f)
+            addView(ImageView(this@LibraryActivity).apply { setImageResource(R.drawable.ic_launcher_foreground); scaleType = ImageView.ScaleType.FIT_CENTER },
+                FrameLayout.LayoutParams(-1, -1))
+        }, LinearLayout.LayoutParams(dp(34), dp(34)))
+        brand.addView(TextView(this).apply {
+            text = "NotePro"; textSize = 21f; setTextColor(INK); textAlignment = View.TEXT_ALIGNMENT_VIEW_START
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setPadding(dp(8), 0, dp(8), dp(12))
-        })
+        }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(10) })
+        col.addView(brand)
         sideList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         col.addView(ScrollView(this).apply { addView(sideList) }, LinearLayout.LayoutParams(-1, 0, 1f))
-        col.addView(navRow("הגדרות", null, false) { startActivity(Intent(this, SettingsActivity::class.java)) })
+        col.addView(View(this).apply { setBackgroundColor(LINE) }, LinearLayout.LayoutParams(-1, 1).apply { bottomMargin = dp(6) })
+        col.addView(navRow("הגדרות", null, false, R.drawable.ic_tune) { startActivity(Intent(this, SettingsActivity::class.java)) })
         return col
     }
 
     private fun buildSidebar() {
         sideList.removeAllViews()
-        sideList.addView(navRow("כל ההערות", null, section is Section.All) { go(Section.All) })
-        sideList.addView(navRow("אחרונות", null, section is Section.Recent) { go(Section.Recent) })
-        sideList.addView(navRow("מועדפים", null, section is Section.Favorites) { go(Section.Favorites) })
-        sideList.addView(navRow("ללא תיקייה", null, section is Section.Unfiled) { go(Section.Unfiled) })
+        val all = store.notes()
+        sideList.addView(navRow("כל ההערות", null, section is Section.All, R.drawable.ic_notes, all.size) { go(Section.All) })
+        sideList.addView(navRow("אחרונות", null, section is Section.Recent, R.drawable.ic_recent) { go(Section.Recent) })
+        sideList.addView(navRow("מועדפים", null, section is Section.Favorites, R.drawable.ic_star, all.count { it.favorite }) { go(Section.Favorites) })
+        sideList.addView(navRow("ללא תיקייה", null, section is Section.Unfiled, R.drawable.ic_inbox) { go(Section.Unfiled) })
 
         val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        header.addView(TextView(this).apply { text = "תיקיות"; textSize = 13f; setTextColor(SUB); setPadding(dp(10), 0, 0, 0) },
+        header.addView(TextView(this).apply { text = "תיקיות"; textSize = 13f; setTextColor(SUB); setPaddingRelative(dp(10), 0, 0, 0) },
             LinearLayout.LayoutParams(0, -2, 1f))
-        header.addView(TextView(this).apply {
-            text = "+"; textSize = 22f; setTextColor(ACCENT); gravity = Gravity.CENTER
+        header.addView(ImageButton(this).apply {
+            setImageResource(R.drawable.ic_add); imageTintList = ColorStateList.valueOf(ACCENT)
+            background = pressable(this@LibraryActivity, 10f); contentDescription = "תיקייה חדשה"
             setOnClickListener { folderDialog(null, null) }
-        }, LinearLayout.LayoutParams(dp(40), dp(40)))
+        }, LinearLayout.LayoutParams(dp(36), dp(36)))
+        if (folders.isEmpty()) {
+            sideList.addView(header, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(14) })
+            sideList.addView(TextView(this).apply {
+                text = "אין תיקיות עדיין"; textSize = 13f; setTextColor(0xFF9AA1AC.toInt()); setPadding(dp(10), dp(4), dp(10), 0)
+                textAlignment = View.TEXT_ALIGNMENT_VIEW_START
+            })
+            return
+        }
         sideList.addView(header, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(14) })
         addFolders(null, 0)
     }
@@ -147,41 +170,44 @@ class LibraryActivity : Activity() {
         }
     }
 
-    private fun navRow(label: String, folder: Folder?, selected: Boolean, onClick: () -> Unit): LinearLayout {
+    private fun navRow(label: String, folder: Folder?, selected: Boolean, icon: Int = 0, count: Int = -1, onClick: () -> Unit): LinearLayout {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            background = rounded(if (selected) ACCENT_SOFT else Color.TRANSPARENT, 10f)
-            setPadding(dp(10), dp(9), dp(10), dp(9))
+            background = pressable(this@LibraryActivity, 10f, if (selected) ACCENT_SOFT else Color.TRANSPARENT)
+            setPadding(dp(10), dp(8), dp(10), dp(8)); minimumHeight = dp(42)
             setOnClickListener { onClick() }
             layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) }
         }
         if (folder != null) {
-            if (folder.emoji.isNotEmpty()) row.addView(TextView(this).apply { text = folder.emoji; textSize = 16f })
-            else row.addView(View(this).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(folder.color) } },
-                LinearLayout.LayoutParams(dp(11), dp(11)))
+            // Folders: their emoji, or a folder icon in the folder's colour.
+            if (folder.emoji.isNotEmpty()) row.addView(TextView(this).apply { text = folder.emoji; textSize = 16f; gravity = Gravity.CENTER },
+                LinearLayout.LayoutParams(dp(22), -2))
+            else row.addView(ImageView(this).apply { setImageResource(R.drawable.ic_folder); imageTintList = ColorStateList.valueOf(folder.color) },
+                LinearLayout.LayoutParams(dp(22), dp(22)))
+        } else if (icon != 0) {
+            row.addView(ImageView(this).apply { setImageResource(icon); imageTintList = ColorStateList.valueOf(if (selected) ACCENT else ICON) },
+                LinearLayout.LayoutParams(dp(22), dp(22)))
         }
         row.addView(TextView(this).apply {
             text = label; textSize = 15f; setTextColor(if (selected) ACCENT else INK)
-            maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
-            setPadding(dp(10), 0, dp(4), 0)
+            if (selected) typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; textAlignment = View.TEXT_ALIGNMENT_VIEW_START
+            setPaddingRelative(dp(12), 0, dp(4), 0)
         }, LinearLayout.LayoutParams(0, -2, 1f))
+        if (count > 0) row.addView(TextView(this).apply { text = count.toString(); textSize = 13f; setTextColor(if (selected) ACCENT else SUB) })
         return row
     }
 
     private fun folderMenu(anchor: View, f: Folder) {
-        val pm = PopupMenu(this, anchor)
-        pm.menu.add(0, 1, 0, "תיקייה חדשה בתוכה"); pm.menu.add(0, 2, 1, "עריכה"); pm.menu.add(0, 3, 2, "מחיקה")
-        pm.setOnMenuItemClickListener {
-            when (it.itemId) {
-                1 -> folderDialog(null, f.id)
-                2 -> folderDialog(f, f.parentId)
-                3 -> AlertDialog.Builder(this).setTitle("למחוק את \"${f.name}\"?")
+        showMenu(anchor, listOf(
+            MenuItem("תיקייה חדשה בתוכה") { folderDialog(null, f.id) },
+            MenuItem("עריכה") { folderDialog(f, f.parentId) },
+            MenuItem("מחיקה", danger = true, separatorBefore = true) {
+                AlertDialog.Builder(this).setTitle("למחוק את \"${f.name}\"?")
                     .setMessage("ההערות שבתוכה יעברו ל\"ללא תיקייה\". תת-התיקיות יימחקו.")
                     .setPositiveButton("מחיקה") { _, _ -> deleteFolder(f) }.setNegativeButton("ביטול", null).show()
-            }
-            true
-        }
-        pm.show()
+            },
+        ))
     }
 
     private fun deleteFolder(f: Folder) {
@@ -231,10 +257,14 @@ class LibraryActivity : Activity() {
         val frame = FrameLayout(this)
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(24), dp(18), dp(24), 0) }
         val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val titles = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         heading = TextView(this).apply {
             textSize = 26f; setTextColor(INK); typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            textAlignment = View.TEXT_ALIGNMENT_VIEW_START
         }
-        top.addView(heading, LinearLayout.LayoutParams(0, -2, 1f))
+        countLine = TextView(this).apply { textSize = 13f; setTextColor(SUB); textAlignment = View.TEXT_ALIGNMENT_VIEW_START }
+        titles.addView(heading); titles.addView(countLine)
+        top.addView(titles, LinearLayout.LayoutParams(0, -2, 1f))
         updateChip = TextView(this).apply {
             textSize = 13f; setTextColor(Color.WHITE); background = rounded(ACCENT, 16f)
             setPadding(dp(12), dp(6), dp(12), dp(6)); visibility = View.GONE
@@ -242,68 +272,108 @@ class LibraryActivity : Activity() {
         }
         top.addView(updateChip, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(12) })
         val search = EditText(this).apply {
-            hint = "חיפוש"; textSize = 15f; isSingleLine = true; textDirection = View.TEXT_DIRECTION_RTL
-            background = rounded(SIDEBAR_BG, 12f); setPadding(dp(14), dp(9), dp(14), dp(9))
+            hint = "חיפוש הערות"; textSize = 15f; isSingleLine = true; textDirection = View.TEXT_DIRECTION_RTL
+            background = rounded(SIDEBAR_BG, 12f); setPadding(dp(12), dp(10), dp(12), dp(10))
+            setHintTextColor(0xFF9AA1AC.toInt())
+            val mag = getDrawable(R.drawable.ic_search)!!.mutate().apply { setTint(SUB); setBounds(0, 0, dp(20), dp(20)) }
+            setCompoundDrawablesRelative(mag, null, null, null); compoundDrawablePadding = dp(8)
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
                 override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
                 override fun afterTextChanged(s: Editable?) { query = s.toString().trim(); refreshNotes() }
             })
         }
-        top.addView(search, LinearLayout.LayoutParams(dp(240), -2))
+        top.addView(search, LinearLayout.LayoutParams(dp(260), -2))
         col.addView(top)
 
         grid = GridView(this).apply {
-            numColumns = GridView.AUTO_FIT; columnWidth = dp(196); stretchMode = GridView.STRETCH_COLUMN_WIDTH
-            horizontalSpacing = dp(18); verticalSpacing = dp(22); clipToPadding = false
-            setPadding(0, dp(20), 0, dp(96)); selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+            numColumns = GridView.AUTO_FIT; columnWidth = dp(172); stretchMode = GridView.STRETCH_COLUMN_WIDTH
+            horizontalSpacing = dp(22); verticalSpacing = dp(26); clipToPadding = false
+            setPadding(dp(4), dp(22), dp(4), dp(110)); selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
             adapter = this@LibraryActivity.adapter
             setOnItemClickListener { _, _, pos, _ -> open(shown[pos]) }
         }
         col.addView(grid, LinearLayout.LayoutParams(-1, 0, 1f))
         frame.addView(col, FrameLayout.LayoutParams(-1, -1))
 
-        empty = TextView(this).apply {
-            textSize = 16f; setTextColor(SUB); gravity = Gravity.CENTER; visibility = View.GONE
-            text = "אין כאן הערות עדיין.\nלחץ על + כדי ליצור הערה חדשה."
+        // Empty state: big page icon, a line of text and a direct "new note" button.
+        empty = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; visibility = View.GONE
+            addView(FrameLayout(this@LibraryActivity).apply {
+                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(ACCENT_SOFT) }
+                emptyIcon = ImageView(this@LibraryActivity).apply { setImageResource(R.drawable.ic_notes); imageTintList = ColorStateList.valueOf(ACCENT) }
+                addView(emptyIcon,
+                    FrameLayout.LayoutParams(dp(44), dp(44), Gravity.CENTER))
+            }, LinearLayout.LayoutParams(dp(96), dp(96)))
+            emptyTitle = TextView(this@LibraryActivity).apply {
+                textSize = 18f; setTextColor(INK); gravity = Gravity.CENTER; typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            }
+            addView(emptyTitle, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(16) })
+            emptySub = TextView(this@LibraryActivity).apply { textSize = 14f; setTextColor(SUB); gravity = Gravity.CENTER }
+            addView(emptySub, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(4) })
+            emptyBtn = TextView(this@LibraryActivity).apply {
+                text = "הערה חדשה"; textSize = 15f; setTextColor(ACCENT); gravity = Gravity.CENTER
+                background = pressable(this@LibraryActivity, 20f, ACCENT_SOFT); setPadding(dp(20), dp(10), dp(20), dp(10))
+                setOnClickListener { newNote() }
+            }
+            addView(emptyBtn, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(18) })
         }
         frame.addView(empty, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
 
-        val fab = TextView(this).apply {
-            text = "+  הערה חדשה"; textSize = 16f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        // Split button: the main part creates a note at once; the arrow opens the other ways to start one.
+        val fab = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             background = rounded(ACCENT, 28f); elevation = 8 * d
-            setPadding(dp(22), dp(14), dp(22), dp(14))
         }
-        fab.setOnClickListener { fabMenu(fab) }
+        val main = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            background = pressable(this@LibraryActivity, 28f); setPadding(dp(18), dp(14), dp(16), dp(14))
+            addView(ImageView(this@LibraryActivity).apply { setImageResource(R.drawable.ic_add); imageTintList = ColorStateList.valueOf(Color.WHITE) },
+                LinearLayout.LayoutParams(dp(22), dp(22)))
+            addView(TextView(this@LibraryActivity).apply {
+                text = "הערה חדשה"; textSize = 16f; setTextColor(Color.WHITE)
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL); setPaddingRelative(dp(8), 0, 0, 0)
+            })
+            setOnClickListener { newNote() }
+        }
+        fab.addView(main)
+        fab.addView(View(this).apply { setBackgroundColor(0x40FFFFFF) }, LinearLayout.LayoutParams(1, dp(26)))
+        val more = ImageButton(this).apply {
+            setImageResource(R.drawable.ic_expand_more); imageTintList = ColorStateList.valueOf(Color.WHITE)
+            background = pressable(this@LibraryActivity, 28f); contentDescription = "אפשרויות נוספות"
+        }
+        more.setOnClickListener { fabMenu(more) }
+        fab.addView(more, LinearLayout.LayoutParams(dp(48), dp(50)))
         frame.addView(fab, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.LEFT).apply { setMargins(dp(24), 0, dp(24), dp(24)) })
         return frame
     }
 
+    private fun newNote() {
+        val pr = Prefs(this); open(store.create(defaultTitle(), currentFolder(), pr.defaultPaper, pr.defaultPaperColor))
+    }
+
     private fun fabMenu(anchor: View) {
-        val pm = PopupMenu(this, anchor)
-        pm.menu.add(0, 1, 0, "הערה חדשה"); pm.menu.add(0, 2, 1, "הערה חדשה מתבנית…"); pm.menu.add(0, 3, 2, "ייבוא PDF")
-        pm.setOnMenuItemClickListener {
-            when (it.itemId) {
-                1 -> { val pr = Prefs(this); open(store.create(defaultTitle(), currentFolder(), pr.defaultPaper, pr.defaultPaperColor)) }
-                2 -> PaperDialog(this, NoteCanvasView.Paper.LINED, Color.WHITE) { p, c ->
-                    open(store.create(defaultTitle(), currentFolder(), p.name, c)) }.show()
-                3 -> Toast.makeText(this, "ייבוא PDF מגיע בשלב הבא", Toast.LENGTH_SHORT).show()
-            }
-            true
-        }
-        pm.show()
+        showMenu(anchor, listOf(
+            MenuItem("הערה חדשה") { newNote() },
+            MenuItem("הערה חדשה מתבנית…") {
+                PaperDialog(this, NoteCanvasView.Paper.LINED, Color.WHITE) { p, c -> open(store.create(defaultTitle(), currentFolder(), p.name, c)) }.show()
+            },
+            MenuItem("תיקייה חדשה") { folderDialog(null, currentFolder()) },
+            MenuItem("ייבוא PDF (בקרוב)", enabled = false, separatorBefore = true),
+        ))
     }
 
     private fun currentFolder() = (section as? Section.InFolder)?.id
 
     private fun open(n: NoteMeta) = startActivity(Intent(this, MainActivity::class.java).putExtra(EXTRA_NOTE, n.id))
 
-    private fun go(s: Section) { section = s; buildSidebar(); refreshNotes() }
+    private fun go(s: Section) { section = s; refreshNotes() }
 
-    private fun reload() { folders = store.folders(); buildSidebar(); refreshNotes() }
+    private fun reload() { folders = store.folders(); refreshNotes() }
 
+    /** Rebuilds the sidebar (selection, counts) and the card grid. */
     private fun refreshNotes() {
+        buildSidebar()
         val all = store.notes()
         heading.text = when (val s = section) {
             Section.All -> "כל ההערות"; Section.Favorites -> "מועדפים"; Section.Recent -> "אחרונות"; Section.Unfiled -> "ללא תיקייה"
@@ -320,7 +390,23 @@ class LibraryActivity : Activity() {
         if (query.isNotEmpty()) list = list.filter { it.title.contains(query, ignoreCase = true) }
         shown = list
         adapter.notifyDataSetChanged()
+        countLine.text = when (list.size) { 0 -> ""; 1 -> "הערה אחת"; else -> "${list.size} הערות" }
         empty.visibility = if (list.isEmpty()) View.VISIBLE else View.GONE
+        val searching = query.isNotEmpty()
+        emptyTitle.text = when {
+            searching -> "לא נמצאו הערות"
+            section is Section.Favorites -> "אין מועדפים עדיין"
+            section is Section.InFolder -> "התיקייה ריקה"
+            else -> "אין כאן הערות עדיין"
+        }
+        emptySub.text = when {
+            searching -> "אין הערה ששמה מכיל \"$query\""
+            section is Section.Favorites -> "בתפריט של הערה בוחרים \"הוספה למועדפים\""
+            else -> "הערה חדשה נפתחת בלחיצה אחת"
+        }
+        emptyBtn.visibility = if (searching || section is Section.Favorites) View.GONE else View.VISIBLE
+        emptyIcon.setImageResource(when { searching -> R.drawable.ic_search; section is Section.Favorites -> R.drawable.ic_star
+            section is Section.InFolder -> R.drawable.ic_folder; else -> R.drawable.ic_notes })
     }
 
     // ================= cards =================
@@ -333,21 +419,32 @@ class LibraryActivity : Activity() {
         override fun getView(pos: Int, convert: View?, parent: ViewGroup?): View {
             val n = shown[pos]
             val card = LinearLayout(this@LibraryActivity).apply { orientation = LinearLayout.VERTICAL; layoutDirection = View.LAYOUT_DIRECTION_RTL }
-            val thumb = ImageView(this@LibraryActivity).apply {
-                scaleType = ImageView.ScaleType.FIT_CENTER; adjustViewBounds = true
-                background = rounded(Color.WHITE, 12f).apply { setStroke(dp(1), LINE) }
-                setPadding(dp(1), dp(1), dp(1), dp(1)); clipToOutline = true; elevation = 2 * d
+            // The thumbnail keeps the page's A4 shape (it used to sit letterboxed in a fixed-height box).
+            val thumb = AspectImageView(this@LibraryActivity, NoteCanvasView.PAGE_H / NoteCanvasView.PAGE_W).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                background = rounded(Color.WHITE, 10f).apply { setStroke(dp(1), LINE) }
+                setPadding(dp(1), dp(1), dp(1), dp(1)); clipToOutline = true; elevation = 3 * d
                 val bmp = store.thumbnail(n.id)
-                if (bmp != null) setImageBitmap(bmp) else setImageDrawable(rounded(if (n.paperColor != -1) n.paperColor else Color.WHITE, 12f))
+                if (bmp != null) setImageBitmap(bmp) else setImageDrawable(rounded(if (n.paperColor != -1) n.paperColor else Color.WHITE, 10f))
             }
-            card.addView(thumb, LinearLayout.LayoutParams(-1, dp(250)))
+            val thumbBox = FrameLayout(this@LibraryActivity).apply { setPadding(dp(2), dp(2), dp(2), dp(4)) }
+            thumbBox.addView(thumb, FrameLayout.LayoutParams(-1, -2))
+            if (n.favorite) thumbBox.addView(ImageView(this@LibraryActivity).apply {
+                setImageResource(R.drawable.ic_star); imageTintList = ColorStateList.valueOf(0xFFE0A100.toInt())
+                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xF2FFFFFF.toInt()) }
+                setPadding(dp(5), dp(5), dp(5), dp(5)); elevation = 4 * d
+            }, FrameLayout.LayoutParams(dp(30), dp(30), Gravity.TOP or Gravity.RIGHT).apply { setMargins(0, dp(8), dp(8), 0) })
+            card.addView(thumbBox, LinearLayout.LayoutParams(-1, -2))
             val row = LinearLayout(this@LibraryActivity).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.TOP }
             val texts = LinearLayout(this@LibraryActivity).apply { orientation = LinearLayout.VERTICAL }
             texts.addView(TextView(this@LibraryActivity).apply {
-                text = (if (n.favorite) "★ " else "") + n.title; textSize = 15f; setTextColor(INK); maxLines = 2
-                ellipsize = android.text.TextUtils.TruncateAt.END
+                text = n.title; textSize = 15f; setTextColor(INK); maxLines = 2
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                ellipsize = android.text.TextUtils.TruncateAt.END; textAlignment = View.TEXT_ALIGNMENT_VIEW_START
             })
-            texts.addView(TextView(this@LibraryActivity).apply { text = dateFmt.format(Date(n.modified)); textSize = 12f; setTextColor(SUB) })
+            texts.addView(TextView(this@LibraryActivity).apply {
+                text = relativeDate(n.modified); textSize = 12f; setTextColor(SUB); textAlignment = View.TEXT_ALIGNMENT_VIEW_START
+            })
             folders.find { it.id == n.folderId }?.let { f ->
                 texts.addView(TextView(this@LibraryActivity).apply {
                     text = (if (f.emoji.isNotEmpty()) f.emoji + " " else "") + f.name; textSize = 11f; setTextColor(f.color)
@@ -367,29 +464,21 @@ class LibraryActivity : Activity() {
     }
 
     private fun cardMenu(anchor: View, n: NoteMeta) {
-        val pm = PopupMenu(this, anchor)
-        pm.menu.add(0, 1, 0, "שינוי שם")
-        pm.menu.add(0, 2, 1, if (n.favorite) "הסרה מהמועדפים" else "הוספה למועדפים")
-        pm.menu.add(0, 3, 2, "שכפול")
-        pm.menu.add(0, 4, 3, "העברה לתיקייה…")
-        pm.menu.add(0, 5, 4, "מחיקה")
-        pm.setOnMenuItemClickListener {
-            when (it.itemId) {
-                1 -> {
-                    val input = EditText(this).apply { setText(n.title); setSelection(text.length); textDirection = View.TEXT_DIRECTION_RTL }
-                    AlertDialog.Builder(this).setTitle("שם ההערה").setView(input)
-                        .setPositiveButton("שמירה") { _, _ -> input.text.toString().trim().takeIf { t -> t.isNotEmpty() }?.let { t -> n.title = t; store.saveMeta(n); refreshNotes() } }
-                        .setNegativeButton("ביטול", null).show()
-                }
-                2 -> { n.favorite = !n.favorite; store.saveMeta(n); refreshNotes() }
-                3 -> { store.duplicate(n, n.title + " (עותק)"); refreshNotes() }
-                4 -> moveDialog(n)
-                5 -> AlertDialog.Builder(this).setTitle("למחוק את \"${n.title}\"?").setMessage("אי אפשר לבטל את המחיקה.")
+        showMenu(anchor, listOf(
+            MenuItem("שינוי שם") {
+                val input = EditText(this).apply { setText(n.title); setSelection(text.length); textDirection = View.TEXT_DIRECTION_RTL }
+                AlertDialog.Builder(this).setTitle("שם ההערה").setView(input)
+                    .setPositiveButton("שמירה") { _, _ -> input.text.toString().trim().takeIf { t -> t.isNotEmpty() }?.let { t -> n.title = t; store.saveMeta(n); refreshNotes() } }
+                    .setNegativeButton("ביטול", null).show()
+            },
+            MenuItem(if (n.favorite) "הסרה מהמועדפים" else "הוספה למועדפים") { n.favorite = !n.favorite; store.saveMeta(n); refreshNotes() },
+            MenuItem("שכפול") { store.duplicate(n, n.title + " (עותק)"); refreshNotes() },
+            MenuItem("העברה לתיקייה…") { moveDialog(n) },
+            MenuItem("מחיקה", danger = true, separatorBefore = true) {
+                AlertDialog.Builder(this).setTitle("למחוק את \"${n.title}\"?").setMessage("אי אפשר לבטל את המחיקה.")
                     .setPositiveButton("מחיקה") { _, _ -> store.delete(n.id); refreshNotes() }.setNegativeButton("ביטול", null).show()
-            }
-            true
-        }
-        pm.show()
+            },
+        ))
     }
 
     private fun moveDialog(n: NoteMeta) {

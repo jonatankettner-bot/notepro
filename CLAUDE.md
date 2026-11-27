@@ -49,12 +49,17 @@ $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-36" "build-
 echo "sdk.dir=$ANDROID_HOME" > <repo>/local.properties   # local.properties is git-ignored
 ```
 Then `./gradlew assembleDebug`. Maven Central sometimes answers 429 through the proxy — wait a minute and retry.
-There is no emulator: the owner tests on the tablet, so describe what to check after each release.
+A cloud session has no emulator: the owner tests on the tablet, so describe what to check after each release.
 Docs-only commits: add `[skip ci]` to the commit message so no empty release is published.
 
-On the owner's Windows PC: JDK 17 and the Android SDK are portable in `%LOCALAPPDATA%\NoteProBuild`
-(`jdk`, `sdk`). Gradle there needs TEMP/TMP pointed at a short path (e.g. `C:\nptmp`), or it fails with
-"Unable to establish loopback connection".
+On the owner's Windows PC: JDK 17 and the Android SDK are portable in
+`Documents\NotePro-research\buildtools` (`jdk`, `sdk`). Not under %LOCALAPPDATA%: writes there from the
+Claude app are virtualized and invisible to other processes. Gradle needs TEMP/TMP pointed at a short path
+(`C:\nptmp`) and `JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=C:\nptmp -Djdk.net.unixdomain.tmpdir=C:\nptmp`,
+or it fails with "Unable to establish loopback connection".
+There is a tablet-sized emulator there too: AVD `NoteProTab` (2960x1848, 320 dpi, Android 36 x86_64).
+Build for it with `gradlew assembleDebug -Pemu` (adds the x86_64 ABI; release builds stay arm64-only),
+drive it with `adb shell input tap/stylus swipe`, and check screens with `adb exec-out screencap -p`.
 
 ## Roadmap (agreed order; adjust with the owner)
 1. ~~Writing canvas test~~ — done (pen, pressure, prediction, palm rejection, stroke eraser, undo/redo).
@@ -70,7 +75,15 @@ On the owner's Windows PC: JDK 17 and the Android SDK are portable in `%LOCALAPP
 
 ## Code map
 - `MainActivity.kt` — editor screen: floating tool pill + style tray (5 colour slots per tool, full palette
-  popover, 3 widths; eraser sizes + Whole/Partial), title, left rail, page counter, ⋮ menu.
+  popover, 3 widths; eraser sizes + Whole/Partial), title, left rail, page counter, ⋮ menu (its toggles write
+  to `Prefs`). Optional docked toolbar (`Prefs.dockedToolbar`): a white strip behind pill + title. Autosaves
+  3 s after the last change, plus on onPause.
+- `Ui.kt` — shared UI: `showMenu` (our own RTL popup menu; use it instead of PopupMenu, which lays out
+  left-to-right on an English-language device), `pressable` ripple background, `Switch.accent()`,
+  `AspectImageView`, `relativeDate`.
+  Gotcha: inside `Paint().apply { }` a bare `color` means the Paint's own colour, so never name a colour
+  parameter `color` in a custom view (this once drew every colour swatch black).
+- `SettingsActivity.kt` / `Prefs.kt` — settings screen (centred 720dp column) and the stored preferences.
 - `PaperDialog.kt` — centred template dialog (paper type thumbnails + paper colours, Cancel/Save).
 - `Theme.kt` — NotePro's colours and the colour palettes.
 - `NoteCanvasView.kt` — pages, view transform (world↔screen), pen vs finger input, whole/partial eraser,
@@ -80,6 +93,9 @@ On the owner's Windows PC: JDK 17 and the Android SDK are portable in `%LOCALAPP
   colour or emoji, long-press menu), note-card grid with thumbnails and `⋮` menu, search, "+ הערה חדשה".
 - `NoteStore.kt` — local storage in filesDir: library.json (folders), notes/<id>/meta.json, ink.bin (own
   binary stroke format), thumb.png. `Families` holds the brush-family singletons used to tag strokes.
-- Notes save on leaving the editor (onPause) when anything changed.
+- Icons: own simple stroke drawings (ic_notes, ic_recent, ic_star, ic_inbox, ic_tune, ic_search, ic_add,
+  ic_folder, ic_expand_more, ic_pages, ic_lasso, ic_more_vert) plus a few Material Symbols. App icon:
+  adaptive `mipmap-anydpi-v26/ic_launcher.xml` (blue background, tilted ruled page, highlighter stripe,
+  handwriting line), own design.
 - Round 2 plan and order: docs/design-research.md → "Round 2 build plan".
 - `Updater.kt` — GitHub release check + PackageInstaller update flow.

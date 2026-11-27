@@ -62,7 +62,7 @@ class MainActivity : Activity() {
     private val d by lazy { resources.displayMetrics.density }
     private val ui = Handler(Looper.getMainLooper())
 
-    private val toolBtns = mutableMapOf<Tool, ImageButton>()
+    private val toolBtns = mutableMapOf<Tool, ToolButton>()
     private var trayOpen = false
     private var prevTool = Tool.PEN
     private var autoDeselectEraser = true
@@ -74,6 +74,9 @@ class MainActivity : Activity() {
     private lateinit var titleView: TextView
     private var metaDirty = false
     private lateinit var pagesPanel: PagesPanel
+    private lateinit var dockBar: View
+    private lateinit var railView: View
+    private var statusTop = 0
 
     private fun togglePages() {
         val v = pagesPanel.view
@@ -101,6 +104,12 @@ class MainActivity : Activity() {
         canvas = NoteCanvasView(this).apply { sideInset = 76 * d }
         val root = FrameLayout(this)
         root.addView(canvas, FrameLayout.LayoutParams(-1, -1))
+        dockBar = FrameLayout(this).apply {
+            // No elevation: it would lift the strip above the (flat) pill and title drawn after it.
+            setBackgroundColor(CARD); visibility = View.GONE
+            addView(View(this@MainActivity).apply { setBackgroundColor(LINE) }, FrameLayout.LayoutParams(-1, 1, Gravity.BOTTOM))
+        }
+        root.addView(dockBar, FrameLayout.LayoutParams(-1, dp(74), Gravity.TOP))
 
         // Overlays live in their own layer so they can be pushed below the status bar.
         val overlay = FrameLayout(this)
@@ -117,10 +126,11 @@ class MainActivity : Activity() {
             setMargins(0, dp(62), dp(16), 0) })
         pill = toolPill()
         overlay.addView(pill, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(10) })
-        overlay.addView(rail(), FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.LEFT).apply {
+        railView = rail()
+        overlay.addView(railView, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.LEFT).apply {
             setMargins(dp(12), dp(10), 0, 0) })
         pagesPanel = PagesPanel(this, canvas) { togglePages() }
-        overlay.addView(pagesPanel.view, FrameLayout.LayoutParams(dp(210), -1, Gravity.RIGHT).apply {
+        overlay.addView(pagesPanel.view, FrameLayout.LayoutParams(dp(228), -1, Gravity.RIGHT).apply {
             setMargins(0, dp(64), dp(12), dp(56)) })
         pagesPanel.view.visibility = View.GONE
 
@@ -165,7 +175,8 @@ class MainActivity : Activity() {
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.displayCutout())
             overlay.setPadding(bars.left, bars.top, bars.right, 0)
-            canvas.topInset = bars.top + 76 * d
+            statusTop = bars.top
+            applyDock(Prefs(this).dockedToolbar)
             insets
         }
         WindowCompat.getInsetsController(window, window.decorView).apply {
@@ -180,10 +191,14 @@ class MainActivity : Activity() {
         canvas.restorePages(meta.pages, meta.bookmarks)
         meta.opened = System.currentTimeMillis(); store.saveMeta(meta)
 
-        canvas.onHistoryChanged = { refreshHistory() }
+        canvas.onHistoryChanged = { refreshHistory(); scheduleAutosave() }
+        pageChip.text = "עמוד 1 מתוך ${canvas.pages}"
+        // Posted: this can fire during a layout pass, where a text change would not re-measure the chip.
         canvas.onPageChanged = { cur, total ->
-            pageChip.text = "עמוד $cur מתוך $total"
-            if (pagesPanel.view.visibility == View.VISIBLE) pagesPanel.refresh()
+            pageChip.post {
+                pageChip.text = "עמוד $cur מתוך $total"
+                if (pagesPanel.view.visibility == View.VISIBLE) pagesPanel.refresh()
+            }
         }
         pageChip.setOnClickListener { togglePages() }
         canvas.onEraseEnded = { fromTool -> if (fromTool && autoDeselectEraser && canvas.tool == Tool.ERASER) selectTool(prevTool) }
@@ -194,15 +209,43 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        applyPrefs()
+        checkForUpdate(manual = false)
+    }
+
+    /** Applies the saved settings (called on resume and after a toggle in the ⋮ menu). */
+    private fun applyPrefs() {
         val p = Prefs(this)
         canvas.usePressure = p.usePressure; canvas.usePrediction = p.usePrediction; canvas.fingerDraws = p.fingerDraws
         canvas.snapLines = p.snapLines; canvas.tapGestures = p.tapGestures; autoDeselectEraser = p.autoDeselectEraser
         if (p.keepScreenOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        checkForUpdate(manual = false)
+        applyDock(p.dockedToolbar)
     }
 
-    override fun onPause() { super.onPause(); save() }
+    /**
+     * Floating (default): the pill floats over the desk. Docked: a solid strip across the top holds the
+     * pill and title, and the page always starts below it, so the toolbar never covers writing.
+     */
+    private fun applyDock(docked: Boolean) {
+        dockBar.visibility = if (docked) View.VISIBLE else View.GONE
+        dockBar.layoutParams.height = statusTop + dp(74)
+        pill.elevation = if (docked) 0f else 6 * d
+        pill.background = if (docked) rounded(0xFFF4F6F9.toInt(), 22f) else card()
+        (updateChip.layoutParams as FrameLayout.LayoutParams).topMargin = if (docked) dp(84) else dp(62)
+        updateChip.requestLayout()
+        (railView.layoutParams as FrameLayout.LayoutParams).topMargin = if (docked) dp(84) else dp(10)
+        (pagesPanel.view.layoutParams as FrameLayout.LayoutParams).topMargin = if (docked) dp(84) else dp(64)
+        dockBar.requestLayout(); railView.requestLayout(); pagesPanel.view.requestLayout()
+        canvas.topInset = statusTop + (if (docked) dp(88) else dp(76)).toFloat()
+    }
+
+    override fun onPause() { super.onPause(); ui.removeCallbacks(autosave); save() }
+
+    // Autosave a few seconds after the last change, so a crash or a forced close (e.g. installing an
+    // update while a note is open) loses at most a few seconds of writing, not the whole session.
+    private val autosave = Runnable { if (!isFinishing) save() }
+    private fun scheduleAutosave() { ui.removeCallbacks(autosave); ui.postDelayed(autosave, 3000) }
 
     /** Writes ink, metadata and the library thumbnail if anything changed. */
     private fun save() {
@@ -221,7 +264,7 @@ class MainActivity : Activity() {
         android.app.AlertDialog.Builder(this).setTitle("שם ההערה").setView(input)
             .setPositiveButton("שמירה") { _, _ ->
                 val t = input.text.toString().trim()
-                if (t.isNotEmpty()) { meta.title = t; titleView.text = t; metaDirty = true }
+                if (t.isNotEmpty()) { meta.title = t; titleView.text = t; metaDirty = true; scheduleAutosave() }
             }
             .setNegativeButton("ביטול", null).show()
     }
@@ -275,11 +318,16 @@ class MainActivity : Activity() {
             Triple(Tool.HIGHLIGHTER, R.drawable.ic_ink_highlighter, "מרקר"),
             Triple(Tool.ERASER, R.drawable.ic_ink_eraser, "מחק"),
             Triple(Tool.LASSO, R.drawable.ic_lasso, "בחירה"))) {
-            val b = icon(res, name) { onToolTapped(t) }
-            (b.layoutParams as LinearLayout.LayoutParams).apply { marginStart = dp(2); marginEnd = dp(2) }
-            toolBtns[t] = b; tools.addView(b)
+            val b = ToolButton().apply {
+                setImageResource(res); contentDescription = name
+                scaleType = android.widget.ImageView.ScaleType.CENTER
+                setOnClickListener { onToolTapped(t) }
+            }
+            toolBtns[t] = b
+            tools.addView(b, LinearLayout.LayoutParams(dp(46), dp(46)).apply { marginStart = dp(2); marginEnd = dp(2) })
         }
-        box.addView(tools)
+        // Explicit wrap_content: with the default match_parent a narrow tray (lasso) squeezed the tool row.
+        box.addView(tools, LinearLayout.LayoutParams(-2, -2))
         tray = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; visibility = View.GONE
         }
@@ -310,6 +358,8 @@ class MainActivity : Activity() {
             val on = t == canvas.tool
             b.background = rounded(if (on) ACCENT_SOFT else Color.TRANSPARENT, 12f)
             b.imageTintList = ColorStateList.valueOf(if (on) ACCENT else ICON)
+            b.mark = when (t) { Tool.PEN -> penSlots[penSlot]; Tool.HIGHLIGHTER -> hlSlots[hlSlot]; else -> 0 }
+            b.invalidate()
         }
         tray.visibility = if (trayOpen) View.VISIBLE else View.GONE
         if (trayOpen) buildTray()
@@ -400,19 +450,22 @@ class MainActivity : Activity() {
             }
         })
         content.addView(grid, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
-        content.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
-        pw.showAsDropDown(pill, (pill.width - content.measuredWidth) / 2, dp(8))
+        showUnderPill(pw)
+    }
+
+    /** Shows a popup centred under the tool pill. */
+    private fun showUnderPill(pw: PopupWindow) {
+        val loc = IntArray(2); pill.getLocationInWindow(loc)
+        val cx = loc[0] + pill.width / 2
+        pw.contentView.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+        val x = (cx - pw.contentView.measuredWidth / 2).coerceAtLeast(dp(8))
+        pw.showAtLocation(pill, Gravity.TOP or Gravity.LEFT, x, loc[1] + pill.height + dp(8))
     }
 
     private fun penTypeMenu(anchor: View) {
-        val pm = PopupMenu(this, anchor)
         val types = listOf(NoteCanvasView.PenType.PRESSURE to "〜  עט רגיש ללחץ", NoteCanvasView.PenType.MARKER to "━  טוש (עובי קבוע)",
             NoteCanvasView.PenType.DASHED to "╌  קו מקווקו")
-        types.forEachIndexed { i, (_, label) -> pm.menu.add(1, i, i, label) }
-        pm.menu.setGroupCheckable(1, true, true)
-        types.forEachIndexed { i, (t, _) -> pm.menu.getItem(i).isChecked = canvas.penType == t }
-        pm.setOnMenuItemClickListener { canvas.penType = types[it.itemId].first; refresh(); true }
-        pm.show()
+        showMenu(anchor, types.map { (t, label) -> MenuItem(label, checked = canvas.penType == t) { canvas.penType = t; refresh() } })
     }
 
     /** Colour grid for recolouring the lasso selection. */
@@ -433,14 +486,17 @@ class MainActivity : Activity() {
     }
 
     /** A round colour swatch; ring + small chevron when selected (tap again = full palette). */
-    private inner class Swatch(val color: Int, val selected: Boolean) : View(this@MainActivity) {
-        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color or 0xFF000000.toInt() }
-        private val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1f * d; this.color = 0x33000000 }
-        private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 2.5f * d; this.color = ACCENT }
+    // Note: the colour parameters are deliberately not called `color` — inside Paint().apply { } that
+    // name would resolve to the Paint's own (black) colour and every swatch would be drawn black.
+    private inner class Swatch(swatch: Int, val selected: Boolean) : View(this@MainActivity) {
+        private val opaque = swatch or 0xFF000000.toInt()
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = opaque }
+        private val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1f * d; color = 0x33000000 }
+        private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 2.5f * d; color = ACCENT }
         private val chev = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE; strokeWidth = 1.8f * d; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
-            val lum = (Color.red(color) * 299 + Color.green(color) * 587 + Color.blue(color) * 114) / 1000
-            this.color = if (lum > 160) INK else Color.WHITE
+            val lum = (Color.red(opaque) * 299 + Color.green(opaque) * 587 + Color.blue(opaque) * 114) / 1000
+            color = if (lum > 160) INK else Color.WHITE
         }
         private val path = Path()
         override fun onDraw(c: Canvas) {
@@ -454,10 +510,25 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Tool icon with a small bar under it in the tool's current colour (pen / highlighter). */
+    private inner class ToolButton : ImageButton(this@MainActivity) {
+        var mark = 0
+        private val bar = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val barEdge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1f * d; color = 0x33000000 }
+        override fun onDraw(c: Canvas) {
+            super.onDraw(c)
+            if (mark == 0) return
+            bar.color = mark or 0xFF000000.toInt()
+            val w = 14 * d; val h = 3.5f * d; val cx = width / 2f; val y = height - 6.5f * d
+            c.drawRoundRect(cx - w / 2, y, cx + w / 2, y + h, h / 2, h / 2, bar)
+            if (Color.luminance(bar.color) > 0.8f) c.drawRoundRect(cx - w / 2, y, cx + w / 2, y + h, h / 2, h / 2, barEdge)
+        }
+    }
+
     /** A width preset: dot of increasing size; soft background when selected. */
-    private inner class SizeDot(val radiusDp: Float, val selected: Boolean, val color: Int) : View(this@MainActivity) {
-        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color or 0xFF000000.toInt() }
-        private val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = ACCENT_SOFT }
+    private inner class SizeDot(val radiusDp: Float, val selected: Boolean, dotColor: Int) : View(this@MainActivity) {
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = dotColor or 0xFF000000.toInt() }
+        private val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = ACCENT_SOFT }
         override fun onDraw(c: Canvas) {
             val cx = width / 2f; val cy = height / 2f
             if (selected) c.drawCircle(cx, cy, 17 * d, bg)
@@ -490,35 +561,22 @@ class MainActivity : Activity() {
     }
 
     private fun showPaperDialog() {
-        PaperDialog(this, canvas.paper, canvas.paperColor) { p, c -> canvas.paper = p; canvas.paperColor = c; metaDirty = true }.show()
+        PaperDialog(this, canvas.paper, canvas.paperColor) { p, c -> canvas.paper = p; canvas.paperColor = c; metaDirty = true; scheduleAutosave() }.show()
     }
 
+    /** The ⋮ menu. Toggles are saved, so they match the settings screen and survive a restart. */
     private fun showMoreMenu(anchor: View) {
-        val pm = PopupMenu(this, anchor)
-        val menu = pm.menu
-        menu.add(0, 7, 0, "תבנית נייר…")
-        menu.add(0, 8, 1, "חזרה אוטומטית מהמחק").setCheckable(true).isChecked = autoDeselectEraser
-        menu.add(0, 9, 1, "קו ישר בהחזקת העט").setCheckable(true).isChecked = canvas.snapLines
-        menu.add(0, 3, 2, "לחץ עט").setCheckable(true).isChecked = canvas.usePressure
-        menu.add(0, 4, 3, "חיזוי תנועה").setCheckable(true).isChecked = canvas.usePrediction
-        menu.add(0, 5, 4, "אצבע כותבת").setCheckable(true).isChecked = canvas.fingerDraws
-        menu.add(0, 2, 5, "נתוני עט").setCheckable(true).isChecked = showDiag
-        menu.add(0, 1, 6, "בדוק עדכון")
-        menu.add(0, 6, 7, "גרסה " + BuildConfig.VERSION_CODE).isEnabled = false
-        pm.setOnMenuItemClickListener {
-            when (it.itemId) {
-                1 -> checkForUpdate(manual = true)
-                2 -> { showDiag = !showDiag; renderDiag() }
-                3 -> canvas.usePressure = !canvas.usePressure
-                4 -> canvas.usePrediction = !canvas.usePrediction
-                5 -> canvas.fingerDraws = !canvas.fingerDraws
-                7 -> showPaperDialog()
-                8 -> autoDeselectEraser = !autoDeselectEraser
-                9 -> canvas.snapLines = !canvas.snapLines
-            }
-            true
-        }
-        pm.show()
+        val p = Prefs(this)
+        showMenu(anchor, listOf(
+            MenuItem("שינוי שם…") { renameDialog() },
+            MenuItem("תבנית נייר…") { showPaperDialog() },
+            MenuItem("קו ישר בהחזקת העט", checked = p.snapLines, separatorBefore = true) { p.snapLines = !p.snapLines; applyPrefs() },
+            MenuItem("חזרה אוטומטית מהמחק", checked = p.autoDeselectEraser) { p.autoDeselectEraser = !p.autoDeselectEraser; applyPrefs() },
+            MenuItem("אצבע כותבת", checked = p.fingerDraws) { p.fingerDraws = !p.fingerDraws; applyPrefs() },
+            MenuItem("סרגל כלים קבוע", checked = p.dockedToolbar) { p.dockedToolbar = !p.dockedToolbar; applyPrefs() },
+            MenuItem("נתוני עט", checked = showDiag) { showDiag = !showDiag; renderDiag() },
+            MenuItem("הגדרות…", separatorBefore = true) { startActivity(android.content.Intent(this, SettingsActivity::class.java)) },
+        ), minWidthDp = 240)
     }
 
     private fun renderDiag() {
@@ -549,6 +607,7 @@ class MainActivity : Activity() {
 
     private fun installUpdate() {
         val rel = pending ?: return
+        save()   // installing replaces the running app
         Updater.install(this, rel) { msg -> updateChip.text = msg }
     }
 }

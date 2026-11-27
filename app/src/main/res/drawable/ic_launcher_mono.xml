@@ -1,0 +1,11 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+  <!-- Themed-icon version: page outline with the handwriting line. -->
+  <group android:rotation="-7" android:pivotX="54" android:pivotY="54">
+    <path android:fillColor="#00000000" android:strokeColor="#FF000000" android:strokeWidth="3"
+        android:pathData="M37,27h36a5,5 0,0 1,5 5v46a5,5 0,0 1,-5 5h-36a5,5 0,0 1,-5 -5v-46a5,5 0,0 1,5 -5z"/>
+    <path android:fillColor="#00000000" android:strokeColor="#FF000000" android:strokeWidth="3"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M41,63C44,55 47,55 48,60C49,65 52,65 54,58.5C55.5,53.5 58,53.5 59,58.5C60,62.5 63,62.5 68,55"/>
+  </group>
+</vector>

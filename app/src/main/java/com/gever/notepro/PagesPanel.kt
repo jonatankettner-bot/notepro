@@ -9,7 +9,6 @@ import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.PopupMenu
 import android.widget.ScrollView
 import android.widget.TextView
 
@@ -55,13 +54,14 @@ class PagesPanel(private val act: Activity, private val canvas: NoteCanvasView, 
         chips.removeAllViews()
         for ((f, label) in listOf(Filter.ALL to "הכול", Filter.MARKED to "מסומנים", Filter.WRITTEN to "כתובים")) {
             val on = f == filter
+            // Equal-width, single-line chips: the panel is narrow and "כתובים" used to wrap letter by letter.
             chips.addView(TextView(act).apply {
-                text = label; textSize = 13f; gravity = Gravity.CENTER
+                text = label; textSize = 13f; gravity = Gravity.CENTER; isSingleLine = true
                 setTextColor(if (on) Color.WHITE else ICON)
                 background = rounded(if (on) ACCENT else 0xFFF1F3F6.toInt(), 14f)
-                setPadding(dp(12), dp(5), dp(12), dp(5))
+                setPadding(dp(4), dp(6), dp(4), dp(6))
                 setOnClickListener { filter = f; refresh() }
-            }, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(6) })
+            }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(2); marginEnd = dp(2) })
         }
 
         list.removeAllViews()
@@ -101,20 +101,13 @@ class PagesPanel(private val act: Activity, private val canvas: NoteCanvasView, 
     }
 
     private fun pageMenu(anchor: View, i: Int) {
-        val pm = PopupMenu(act, anchor)
-        pm.menu.add(0, 1, 0, "עמוד חדש אחרי")
-        pm.menu.add(0, 2, 1, "שכפול עמוד")
-        pm.menu.add(0, 3, 2, "ניקוי עמוד")
-        if (canvas.pages > 1) pm.menu.add(0, 4, 3, "מחיקת עמוד")
-        pm.setOnMenuItemClickListener {
-            when (it.itemId) {
-                1 -> canvas.insertPageAfter(i)
-                2 -> canvas.duplicatePage(i)
-                3 -> canvas.clearPage(i)
-                4 -> canvas.deletePage(i)
-            }
-            refresh(); true
-        }
-        pm.show()
+        val items = mutableListOf(
+            MenuItem("עמוד חדש אחרי") { canvas.insertPageAfter(i); refresh() },
+            MenuItem("שכפול עמוד") { canvas.duplicatePage(i); refresh() },
+            MenuItem(if (i in canvas.bookmarks) "הסרת סימנייה" else "סימון בסימנייה") { canvas.toggleBookmark(i); refresh() },
+            MenuItem("ניקוי עמוד", danger = true, separatorBefore = true) { canvas.clearPage(i); refresh() },
+        )
+        if (canvas.pages > 1) items += MenuItem("מחיקת עמוד", danger = true) { canvas.deletePage(i); refresh() }
+        showMenu(anchor, items, minWidthDp = 190)
     }
 }

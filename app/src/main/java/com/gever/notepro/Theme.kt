@@ -8,6 +8,7 @@ const val INK = 0xFF1C1F26.toInt()          // main text
 const val SUB = 0xFF6B7280.toInt()          // secondary text
 const val CARD = 0xFFFFFFFF.toInt()         // floating cards (toolbar, rail)
 const val LINE = 0xFFE3E6EB.toInt()         // dividers
+const val DANGER = 0xFFC62828.toInt()       // destructive menu rows
 
 /** 3 rows x 8 colours for the full colour popover (pen). Highlighter uses the same hues, translucent. */
 val PALETTE = intArrayOf(

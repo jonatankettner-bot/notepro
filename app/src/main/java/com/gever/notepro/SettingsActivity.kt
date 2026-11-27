@@ -31,7 +31,11 @@ class SettingsActivity : Activity() {
             orientation = LinearLayout.VERTICAL; layoutDirection = View.LAYOUT_DIRECTION_RTL
             setPadding(dp(24), dp(16), dp(24), dp(32))
         }
-        val scroll = ScrollView(this).apply { setBackgroundColor(0xFFF4F6F9.toInt()); addView(col) }
+        // A centred column of readable width: full-width rows on the 14.6" screen put the switch far from its label.
+        val holder = android.widget.FrameLayout(this)
+        val w = if (resources.configuration.screenWidthDp > 800) dp(720) else -1
+        holder.addView(col, android.widget.FrameLayout.LayoutParams(w, -2, Gravity.CENTER_HORIZONTAL))
+        val scroll = ScrollView(this).apply { setBackgroundColor(0xFFF4F6F9.toInt()); addView(holder) }
         setContentView(scroll)
         ViewCompat.setOnApplyWindowInsetsListener(scroll) { v, insets ->
             val b = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
@@ -39,8 +43,10 @@ class SettingsActivity : Activity() {
         }
 
         val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        top.addView(TextView(this).apply { text = "→"; textSize = 24f; setTextColor(ICON); gravity = Gravity.CENTER; setOnClickListener { finish() } },
-            LinearLayout.LayoutParams(dp(44), dp(44)))
+        top.addView(android.widget.ImageButton(this).apply {
+            setImageResource(R.drawable.ic_arrow_forward_ios); imageTintList = android.content.res.ColorStateList.valueOf(ICON)
+            background = pressable(this@SettingsActivity, 12f); contentDescription = "חזרה"; setOnClickListener { finish() }
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
         top.addView(TextView(this).apply { text = "הגדרות"; textSize = 26f; setTextColor(INK); typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL) })
         col.addView(top)
 
@@ -55,7 +61,7 @@ class SettingsActivity : Activity() {
             Triple("הקשה בשתי אצבעות = ביטול", "והקשה בשלוש אצבעות = חזרה", prefs::tapGestures),
         ))
         section("מראה", listOf(
-            Triple("סרגל כלים קבוע", "הסרגל בפס קבוע מעל הדף ולא מרחף מעליו", prefs::dockedToolbar),
+            Triple("סרגל כלים קבוע", "הסרגל יושב בפס לבן מעל הדף, כך שהוא אף פעם לא מסתיר כתב", prefs::dockedToolbar),
             Triple("המסך נשאר דולק", "בזמן כתיבה בהערה", prefs::keepScreenOn),
         ))
 
@@ -70,7 +76,9 @@ class SettingsActivity : Activity() {
             })
         }
         card("אודות").apply {
-            addView(TextView(this@SettingsActivity).apply { text = "NotePro · גרסה " + BuildConfig.VERSION_CODE; textSize = 15f; setTextColor(INK) })
+            addView(TextView(this@SettingsActivity).apply {
+                text = "NotePro · גרסה " + BuildConfig.VERSION_CODE; textSize = 15f; setTextColor(INK); textAlignment = View.TEXT_ALIGNMENT_VIEW_START
+            })
             addView(TextView(this@SettingsActivity).apply {
                 text = "בדיקת עדכון"; textSize = 15f; setTextColor(ACCENT); setPadding(0, dp(10), 0, dp(4))
                 setOnClickListener {
@@ -105,10 +113,12 @@ class SettingsActivity : Activity() {
             if (i > 0) c.addView(View(this).apply { setBackgroundColor(LINE) }, LinearLayout.LayoutParams(-1, 1))
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(10), 0, dp(10)) }
             val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            texts.addView(TextView(this).apply { text = label; textSize = 16f; setTextColor(INK) })
-            texts.addView(TextView(this).apply { text = sub; textSize = 13f; setTextColor(SUB) })
+            texts.addView(TextView(this).apply { text = label; textSize = 16f; setTextColor(INK); textAlignment = View.TEXT_ALIGNMENT_VIEW_START })
+            texts.addView(TextView(this).apply { text = sub; textSize = 13f; setTextColor(SUB); textAlignment = View.TEXT_ALIGNMENT_VIEW_START })
             row.addView(texts, LinearLayout.LayoutParams(0, -2, 1f))
-            row.addView(Switch(this).apply { isChecked = prop.get(); setOnCheckedChangeListener { _, on -> prop.set(on) } })
+            val sw = Switch(this).apply { isChecked = prop.get(); accent(); setOnCheckedChangeListener { _, on -> prop.set(on) } }
+            row.addView(sw, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(16) })
+            row.setOnClickListener { sw.toggle() }   // the whole row toggles, not only the small switch
             c.addView(row)
         }
     }

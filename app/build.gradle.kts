@@ -18,7 +18,8 @@ android {
         targetSdk = 36
         versionCode = ciVersionCode
         versionName = "0.1.$ciVersionCode"
-        ndk { abiFilters += listOf("arm64-v8a") }
+        // Tablet only needs arm64. `-Pemu` adds x86_64 for local emulator testing.
+        ndk { abiFilters += if (project.hasProperty("emu")) listOf("arm64-v8a", "x86_64") else listOf("arm64-v8a") }
     }
 
     signingConfigs {
