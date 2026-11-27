@@ -78,6 +78,20 @@ drive it with `adb shell input tap/stylus swipe`, and check screens with `adb ex
   popover, 3 widths; eraser sizes + Whole/Partial), title, left rail, page counter, ⋮ menu (its toggles write
   to `Prefs`). Optional docked toolbar (`Prefs.dockedToolbar`): a white strip behind pill + title. Autosaves
   3 s after the last change, plus on onPause.
+- Toolbar (MainActivity, "floating toolbar (two rows)"): row 1 = pen, fountain pen, pencil, highlighter,
+  eraser, lasso, insert, shapes, sticky note | text, collapse chevron (insert/shapes/sticky/text only show
+  "coming soon" for now). Row 2 = the tool's options: colour slots (tap selected = colour popover,
+  long-press = change/remove, + adds up to 6) | 3 width presets (tap selected = width slider) | pen style.
+  Per-tool colours/widths live in `InkSettings.kt` and are saved in Prefs (keys `pen.*`, `fountain.*`,
+  `pencil.*`, `hl.*`, `pen.type`, `pen.effect`, `pen.stab`, `tool`, `recentColors`).
+- `Popovers.kt` — Bubble popover with arrow (`showPopover`), colour popover (recent colours, 4 swipeable
+  palette pages from `COLOR_PAGES`, eyedropper, custom colour dialog), width slider, pen style popover
+  (variable / fixed / dashed / dotted, rainbow / glitter effects, stabilization 0.0–1.0), shared small views.
+- `Brushes.kt` — `Families`: every brush family and the 1-byte code stored per stroke in ink.bin
+  (low 4 bits kind, high 4 bits stabilization level). Custom families use the ink custom-brush API
+  (`@ExperimentalInkCustomBrushApi`): dotted = particle tip, fountain = flat nib at 45°, pencil = pressure
+  opacity + noise, rainbow = hue offset by distance, glitter = extra sparkle coat, stabilization =
+  `SlidingWindowModel`. Codes 0..3 are the old ones, so old notes load unchanged.
 - `Ui.kt` — shared UI: `showMenu` (our own RTL popup menu; use it instead of PopupMenu, which lays out
   left-to-right on an English-language device), `pressable` ripple background, `Switch.accent()`,
   `AspectImageView`, `relativeDate`.

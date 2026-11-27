@@ -39,7 +39,7 @@ import kotlin.math.min
  */
 class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
 
-    enum class Tool { PEN, HIGHLIGHTER, ERASER, LASSO }
+    enum class Tool { PEN, FOUNTAIN, PENCIL, HIGHLIGHTER, ERASER, LASSO }
     enum class LassoMode { FREEFORM, RECT }
     enum class Paper { LINED, GRID, DOTS, BLANK }
     /** WHOLE removes touched strokes; PARTIAL cuts them, the remaining pieces stay normal strokes. */
@@ -204,15 +204,40 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
 
     private fun brush(): Brush = when (tool) {
         Tool.HIGHLIGHTER -> Brush.createWithColorIntArgb(Families.highlighter, hlColor, hlSize, 0.1f)
-        else -> Brush.createWithColorIntArgb(when (penType) {
-            PenType.MARKER -> Families.marker
-            PenType.DASHED -> Families.dashed
-            PenType.PRESSURE -> if (usePressure) Families.pen else Families.marker
-        }, penColor, penSize, 0.05f)
+        Tool.FOUNTAIN -> Brush.createWithColorIntArgb(Families.of(Families.K_FOUNTAIN), penColor, penSize, 0.05f)
+        Tool.PENCIL -> Brush.createWithColorIntArgb(Families.of(Families.K_PENCIL), penColor, penSize, 0.05f)
+        else -> {
+            val type = if (penType == PenType.PRESSURE && !usePressure) PenType.MARKER else penType
+            // Rainbow turns the hue along the stroke, which needs a saturated start colour (black has no hue).
+            val color = if (penEffect == PenEffect.RAINBOW) 0xFFE53935.toInt() else penColor
+            Brush.createWithColorIntArgb(Families.of(Families.penCode(type, penEffect, stabilization)), color, penSize, 0.05f)
+        }
     }
 
-    enum class PenType { PRESSURE, MARKER, DASHED }
+    // Regular pen style (the pen's style popover).
     var penType = PenType.PRESSURE
+    var penEffect = PenEffect.NONE
+    /** 0..10 = stabilization 0.0..1.0 (input smoothing). */
+    var stabilization = 0
+
+    // ---- eyedropper: the next touch on the page reports the colour of the ink under it ----
+    /** Called with the colour under the touch, or null when the touch hit no ink. */
+    var onColorPicked: ((Int?) -> Unit)? = null
+    private var picking = false
+    private var pickSwallow = false
+    fun startColorPick() { picking = true }
+
+    private fun colorAt(sx: Float, sy: Float): Int? {
+        val p = toWorld(sx, sy)
+        val r = 8 * d / s
+        val box = ImmutableBox.fromCenterAndDimensions(ImmutableVec(p[0], p[1]), 2 * r, 2 * r)
+        for (k in strokes.indices.reversed()) {
+            val st = strokes[k]; val b = boundsOf(st)
+            if (p[0] < b.left - r || p[0] > b.right + r || p[1] < b.top - r || p[1] > b.bottom + r) continue
+            if (st.shape.computeCoverageIsGreaterThan(box, 0f)) return st.brush.colorIntArgb or 0xFF000000.toInt()
+        }
+        return null
+    }
     /** Draw, hold the pen still ~0.5 s, lift: a nearly straight stroke becomes a straight line. */
     var snapLines = true
 
@@ -253,6 +278,15 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
 
     private fun onInput(e: MotionEvent): Boolean {
         val action = e.actionMasked
+        if (picking && action == MotionEvent.ACTION_DOWN) {
+            picking = false; pickSwallow = true
+            onColorPicked?.invoke(colorAt(e.x, e.y))
+            return true
+        }
+        if (pickSwallow) {   // the rest of the eyedropper touch must not draw or scroll
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) pickSwallow = false
+            return true
+        }
         if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
             val idx = e.actionIndex
             val type = e.getToolType(idx)

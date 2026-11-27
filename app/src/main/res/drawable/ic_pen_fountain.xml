@@ -1,0 +1,12 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+  <!-- Fountain pen nib (own drawing). -->
+  <path android:fillColor="#00000000" android:strokeColor="#FF000000" android:strokeWidth="1.8"
+      android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M12,2.8L17.2,9.2L14.6,21L9.4,21L6.8,9.2Z"/>
+  <path android:fillColor="#00000000" android:strokeColor="#FF000000" android:strokeWidth="1.8"
+      android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M12,9.2L12,14.2"/>
+  <path android:fillColor="#00000000" android:strokeColor="#FF000000" android:strokeWidth="1.8"
+      android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M11,15.6a1,1 0,1 0,2 0a1,1 0,1 0,-2 0Z"/>
+  <path android:fillColor="#00000000" android:strokeColor="#FF000000" android:strokeWidth="1.8"
+      android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M8.2,17.6L15.8,17.6"/>
+</vector>

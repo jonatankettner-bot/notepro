@@ -38,14 +38,12 @@ const val EXTRA_NOTE = "note_id"
 /** "הערה · 27 בנוב׳ 2026" */
 fun defaultTitle(): String = "הערה · " + SimpleDateFormat("d בMMM yyyy", Locale.forLanguageTag("he")).format(Date())
 
-private val PEN_SIZES = floatArrayOf(2.4f, 4f, 6.5f)
-private val HL_SIZES = floatArrayOf(18f, 28f, 40f)
 private val ERASER_SIZES = floatArrayOf(6f, 12f, 24f)   // radius, screen dp
 private val DOT_RADII = floatArrayOf(3f, 5f, 8f)         // how the 3 width presets look
 
 /**
  * Note editor, Notability-style layout with our own look:
- * - a floating tool pill at the top centre (one row; tap the selected tool again for its style tray),
+ * - a floating two-row toolbar at the top centre (tools; options of the selected tool),
  * - back + title floating in the top start corner,
  * - a narrow action rail on the left edge (undo, redo, paper, more),
  * - a page counter at the bottom.
@@ -56,14 +54,12 @@ class MainActivity : Activity() {
     private lateinit var updateChip: TextView
     private lateinit var pageChip: TextView
     private lateinit var pill: LinearLayout
-    private lateinit var tray: LinearLayout
     private lateinit var undoBtn: ImageButton
     private lateinit var redoBtn: ImageButton
     private val d by lazy { resources.displayMetrics.density }
     private val ui = Handler(Looper.getMainLooper())
 
     private val toolBtns = mutableMapOf<Tool, ToolButton>()
-    private var trayOpen = false
     private var prevTool = Tool.PEN
     private var autoDeselectEraser = true
     private var showDiag = false
@@ -76,6 +72,7 @@ class MainActivity : Activity() {
     private lateinit var pagesPanel: PagesPanel
     private lateinit var dockBar: View
     private lateinit var railView: View
+    private lateinit var titleBox: View
     private var statusTop = 0
 
     private fun togglePages() {
@@ -84,11 +81,6 @@ class MainActivity : Activity() {
         else { pagesPanel.refresh(); v.visibility = View.VISIBLE }
     }
 
-    // Each inking tool keeps 5 quick colour slots; the selected slot is the active colour.
-    private val penSlots = intArrayOf(PALETTE[0], PALETTE[3], PALETTE[8], PALETTE[6], PALETTE[11])
-    private val hlSlots = intArrayOf(HL_PALETTE[0], HL_PALETTE[10], HL_PALETTE[4], HL_PALETTE[8], HL_PALETTE[2])
-    private var penSlot = 0
-    private var hlSlot = 0
 
     private fun dp(v: Float) = (v * d).toInt()
     private fun dp(v: Int) = (v * d).toInt()
@@ -102,6 +94,7 @@ class MainActivity : Activity() {
             ?: store.create(defaultTitle(), null)
 
         canvas = NoteCanvasView(this).apply { sideInset = 76 * d }
+        loadToolPrefs()
         val root = FrameLayout(this)
         root.addView(canvas, FrameLayout.LayoutParams(-1, -1))
         dockBar = FrameLayout(this).apply {
@@ -115,7 +108,8 @@ class MainActivity : Activity() {
         val overlay = FrameLayout(this)
         root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
 
-        overlay.addView(titleCluster(), FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.RIGHT).apply {
+        titleBox = titleCluster()
+        overlay.addView(titleBox, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.RIGHT).apply {
             setMargins(dp(12), dp(10), dp(12), 0) })
         updateChip = TextView(this).apply {
             textSize = 13f; setTextColor(Color.WHITE); background = rounded(ACCENT, 16f); elevation = 4 * d
@@ -126,6 +120,11 @@ class MainActivity : Activity() {
             setMargins(0, dp(62), dp(16), 0) })
         pill = toolPill()
         overlay.addView(pill, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(10) })
+        // When the toolbar changes height (row 2 shown / hidden), move the page start and the docked strip with it.
+        pill.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            if (bottom - top != oldBottom - oldTop) pill.post { applyDock(docked) }
+        }
+        overlay.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> avoidTitle() }
         railView = rail()
         overlay.addView(railView, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.LEFT).apply {
             setMargins(dp(12), dp(10), 0, 0) })
@@ -228,16 +227,30 @@ class MainActivity : Activity() {
      * pill and title, and the page always starts below it, so the toolbar never covers writing.
      */
     private fun applyDock(docked: Boolean) {
+        this.docked = docked
+        // The toolbar is one or two rows tall; use its real height once it has been laid out.
+        val pillH = if (pill.height > 0) pill.height else dp(if (collapsed) 54 else 112)
+        val below = dp(10) + pillH + dp(10)          // overlay coordinates (the overlay starts under the status bar)
         dockBar.visibility = if (docked) View.VISIBLE else View.GONE
-        dockBar.layoutParams.height = statusTop + dp(74)
+        dockBar.layoutParams.height = statusTop + below
         pill.elevation = if (docked) 0f else 6 * d
         pill.background = if (docked) rounded(0xFFF4F6F9.toInt(), 22f) else card()
-        (updateChip.layoutParams as FrameLayout.LayoutParams).topMargin = if (docked) dp(84) else dp(62)
-        updateChip.requestLayout()
-        (railView.layoutParams as FrameLayout.LayoutParams).topMargin = if (docked) dp(84) else dp(10)
-        (pagesPanel.view.layoutParams as FrameLayout.LayoutParams).topMargin = if (docked) dp(84) else dp(64)
-        dockBar.requestLayout(); railView.requestLayout(); pagesPanel.view.requestLayout()
-        canvas.topInset = statusTop + (if (docked) dp(88) else dp(76)).toFloat()
+        (updateChip.layoutParams as FrameLayout.LayoutParams).topMargin = if (docked) below + dp(8) else dp(62)
+        (railView.layoutParams as FrameLayout.LayoutParams).topMargin = if (docked) below + dp(10) else dp(10)
+        (pagesPanel.view.layoutParams as FrameLayout.LayoutParams).topMargin = if (docked) below + dp(10) else dp(64)
+        updateChip.requestLayout(); dockBar.requestLayout(); railView.requestLayout(); pagesPanel.view.requestLayout()
+        canvas.topInset = (statusTop + below + if (docked) dp(14) else dp(2)).toFloat()
+    }
+
+    private var docked = false
+
+    /** On a narrow (portrait) screen the centred toolbar can run into the title; slide it left, not past the rail. */
+    private fun avoidTitle() {
+        if (pill.width == 0 || titleBox.width == 0) return
+        val overlap = pill.right + dp(8) - titleBox.left
+        val room = (pill.left - (railView.right + dp(8))).coerceAtLeast(0)
+        val tx = if (overlap > 0) -minOf(overlap, room).toFloat() else 0f
+        if (pill.translationX != tx) pill.translationX = tx
     }
 
     override fun onPause() { super.onPause(); ui.removeCallbacks(autosave); save() }
@@ -304,7 +317,48 @@ class MainActivity : Activity() {
         return row
     }
 
-    // ================= floating tool pill =================
+    // ================= floating toolbar (two rows) =================
+    // Row 1: the tools. Row 2: the selected tool's options (colours | widths | pen style).
+    // The chevron at the end of row 1 hides / shows row 2.
+    private enum class Btn(val res: Int, val label: String, val tool: Tool?) {
+        PEN(R.drawable.ic_edit, "עט", Tool.PEN),
+        FOUNTAIN(R.drawable.ic_pen_fountain, "עט נובע", Tool.FOUNTAIN),
+        PENCIL(R.drawable.ic_pencil, "עיפרון", Tool.PENCIL),
+        HIGHLIGHTER(R.drawable.ic_ink_highlighter, "מרקר", Tool.HIGHLIGHTER),
+        ERASER(R.drawable.ic_ink_eraser, "מחק", Tool.ERASER),
+        LASSO(R.drawable.ic_lasso, "בחירה", Tool.LASSO),
+        INSERT(R.drawable.ic_add_circle, "הוספה", null),
+        SHAPES(R.drawable.ic_shapes, "צורות", null),
+        STICKY(R.drawable.ic_sticky, "פתק", null),
+        TEXT(R.drawable.ic_text, "טקסט", null),
+    }
+
+    private val prefs by lazy { Prefs(this) }
+    private val penInk = InkSettings("pen", intArrayOf(PALETTE[0], PALETTE[3], PALETTE[8]), intArrayOf(4, 6, 8), PEN_WIDTHS)
+    private val fountainInk = InkSettings("fountain", intArrayOf(PALETTE[0], 0xFF1E3A8A.toInt(), 0xFF9F1239.toInt()), intArrayOf(6, 8, 10), PEN_WIDTHS)
+    private val pencilInk = InkSettings("pencil", intArrayOf(0xFF4B5563.toInt(), PALETTE[0], PALETTE[3]), intArrayOf(3, 5, 7), PEN_WIDTHS)
+    private val hlInk = InkSettings("hl", intArrayOf(HL_PALETTE[0], HL_PALETTE[10], HL_PALETTE[4]), intArrayOf(4, 7, 9), HL_WIDTHS)
+    private fun inkFor(t: Tool) = when (t) {
+        Tool.PEN -> penInk; Tool.FOUNTAIN -> fountainInk; Tool.PENCIL -> pencilInk; Tool.HIGHLIGHTER -> hlInk; else -> null
+    }
+
+    private lateinit var optionsRow: LinearLayout
+    private lateinit var optionsDivider: View
+    private lateinit var collapseBtn: ImageButton
+    private var collapsed = false
+    private val slotViews = mutableListOf<View>()
+    private var styleBtnPreview: StylePreview? = null
+
+    /** Restores the toolbar's saved state: per-tool colours and widths, pen style, last tool, collapsed row. */
+    private fun loadToolPrefs() {
+        for (ink in listOf(penInk, fountainInk, pencilInk, hlInk)) ink.load(prefs)
+        canvas.penType = runCatching { PenType.valueOf(prefs.str("pen.type", "PRESSURE")) }.getOrDefault(PenType.PRESSURE)
+        canvas.penEffect = runCatching { PenEffect.valueOf(prefs.str("pen.effect", "NONE")) }.getOrDefault(PenEffect.NONE)
+        canvas.stabilization = prefs.int("pen.stab", 0).coerceIn(0, 10)
+        canvas.tool = runCatching { Tool.valueOf(prefs.str("tool", "PEN")) }.getOrDefault(Tool.PEN)
+        collapsed = prefs.toolbarCollapsed
+    }
+
     private fun toolPill(): LinearLayout {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
@@ -312,32 +366,39 @@ class MainActivity : Activity() {
             background = card(); elevation = 6 * d
             setPadding(dp(8), dp(4), dp(8), dp(4))
         }
-        val tools = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
-        for ((t, res, name) in listOf(
-            Triple(Tool.PEN, R.drawable.ic_edit, "עט"),
-            Triple(Tool.HIGHLIGHTER, R.drawable.ic_ink_highlighter, "מרקר"),
-            Triple(Tool.ERASER, R.drawable.ic_ink_eraser, "מחק"),
-            Triple(Tool.LASSO, R.drawable.ic_lasso, "בחירה"))) {
-            val b = ToolButton().apply {
-                setImageResource(res); contentDescription = name
+        val tools = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        for (b in Btn.values()) {
+            if (b == Btn.TEXT) tools.addView(vDivider())
+            val v = ToolButton().apply {
+                setImageResource(b.res); contentDescription = b.label
                 scaleType = android.widget.ImageView.ScaleType.CENTER
-                setOnClickListener { onToolTapped(t) }
+                background = pressable(this@MainActivity, 12f)
+                imageTintList = ColorStateList.valueOf(ICON)
+                setOnClickListener { onToolButton(b) }
             }
-            toolBtns[t] = b
-            tools.addView(b, LinearLayout.LayoutParams(dp(46), dp(46)).apply { marginStart = dp(2); marginEnd = dp(2) })
+            b.tool?.let { toolBtns[it] = v }
+            tools.addView(v, LinearLayout.LayoutParams(dp(46), dp(46)).apply { marginStart = dp(1); marginEnd = dp(1) })
         }
-        // Explicit wrap_content: with the default match_parent a narrow tray (lasso) squeezed the tool row.
+        collapseBtn = icon(R.drawable.ic_expand_less, "הסתרת אפשרויות", size = 40) {
+            collapsed = !collapsed; prefs.toolbarCollapsed = collapsed; refresh()
+        }
+        tools.addView(collapseBtn)
+        // Explicit wrap_content: with the default match_parent a narrow options row squeezed the tool row.
         box.addView(tools, LinearLayout.LayoutParams(-2, -2))
-        tray = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; visibility = View.GONE
-        }
-        box.addView(tray, LinearLayout.LayoutParams(-2, dp(48)))
+        optionsDivider = View(this).apply { setBackgroundColor(LINE) }
+        box.addView(optionsDivider, LinearLayout.LayoutParams(-1, 1).apply { topMargin = dp(2) })
+        optionsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        box.addView(optionsRow, LinearLayout.LayoutParams(-2, dp(54)))
         return box
     }
 
-    /** First tap selects a tool; tapping the selected tool again opens / closes its style tray. */
-    private fun onToolTapped(t: Tool) {
-        if (t == canvas.tool) { trayOpen = !trayOpen; refresh(); return }
+    private fun onToolButton(b: Btn) {
+        val t = b.tool
+        if (t == null) {
+            Toast.makeText(this, "${b.label}: הכלי הזה עוד לא מוכן, הוא יגיע באחד השלבים הבאים", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (t == canvas.tool) { if (collapsed) { collapsed = false; prefs.toolbarCollapsed = false; refresh() }; return }
         selectTool(t)
     }
 
@@ -345,78 +406,149 @@ class MainActivity : Activity() {
         if (t == Tool.ERASER && canvas.tool != Tool.ERASER) prevTool = canvas.tool
         if (t != Tool.LASSO) canvas.clearSelection()
         canvas.tool = t
+        if (inkFor(t) != null) prefs.putStr("tool", t.name)
         applyColor(); refresh()
     }
 
     private fun applyColor() {
-        canvas.penColor = penSlots[penSlot]
-        canvas.hlColor = (HL_ALPHA shl 24) or (hlSlots[hlSlot] and 0xFFFFFF)
+        inkFor(canvas.tool)?.takeIf { it !== hlInk }?.let { canvas.penColor = it.color; canvas.penSize = it.size }
+        canvas.hlColor = (HL_ALPHA shl 24) or (hlInk.color and 0xFFFFFF)
+        canvas.hlSize = hlInk.size
     }
 
     private fun refresh() {
         for ((t, b) in toolBtns) {
             val on = t == canvas.tool
-            b.background = rounded(if (on) ACCENT_SOFT else Color.TRANSPARENT, 12f)
+            b.background = pressable(this, 12f, if (on) ACCENT_SOFT else Color.TRANSPARENT)
             b.imageTintList = ColorStateList.valueOf(if (on) ACCENT else ICON)
-            b.mark = when (t) { Tool.PEN -> penSlots[penSlot]; Tool.HIGHLIGHTER -> hlSlots[hlSlot]; else -> 0 }
+            b.mark = inkFor(t)?.color ?: 0
             b.invalidate()
         }
-        tray.visibility = if (trayOpen) View.VISIBLE else View.GONE
-        if (trayOpen) buildTray()
+        val vis = if (collapsed) View.GONE else View.VISIBLE
+        optionsRow.visibility = vis; optionsDivider.visibility = vis
+        collapseBtn.setImageResource(if (collapsed) R.drawable.ic_expand_more else R.drawable.ic_expand_less)
+        collapseBtn.contentDescription = if (collapsed) "הצגת אפשרויות" else "הסתרת אפשרויות"
+        if (!collapsed) buildOptions()
         refreshHistory()
     }
 
-    private fun buildTray() {
-        tray.removeAllViews()
+    private fun dotRadius(ink: InkSettings, step: Int) = 2f + 7.5f * (step - 1) / (ink.steps - 1f)
+
+    private fun buildOptions() {
+        optionsRow.removeAllViews(); slotViews.clear(); styleBtnPreview = null
         when (canvas.tool) {
             Tool.LASSO -> {
-                tray.addView(chip("חופשי", canvas.lassoMode == NoteCanvasView.LassoMode.FREEFORM) { canvas.lassoMode = NoteCanvasView.LassoMode.FREEFORM; refresh() })
-                tray.addView(chip("מלבן", canvas.lassoMode == NoteCanvasView.LassoMode.RECT) { canvas.lassoMode = NoteCanvasView.LassoMode.RECT; refresh() })
+                optionsRow.addView(chip("חופשי", canvas.lassoMode == NoteCanvasView.LassoMode.FREEFORM) { canvas.lassoMode = NoteCanvasView.LassoMode.FREEFORM; refresh() })
+                optionsRow.addView(chip("מלבן", canvas.lassoMode == NoteCanvasView.LassoMode.RECT) { canvas.lassoMode = NoteCanvasView.LassoMode.RECT; refresh() })
             }
             Tool.ERASER -> {
                 ERASER_SIZES.forEachIndexed { i, r ->
-                    tray.addView(SizeDot(DOT_RADII[i], r == canvas.eraserRadiusDp, 0xFF9AA3AF.toInt()).apply {
-                        layoutParams = LinearLayout.LayoutParams(dp(38), dp(44))
+                    optionsRow.addView(WidthDot(this, DOT_RADII[i], r == canvas.eraserRadiusDp, 0xFF9AA3AF.toInt()).apply {
                         setOnClickListener { canvas.eraserRadiusDp = r; refresh() }
-                    })
+                    }, LinearLayout.LayoutParams(dp(42), dp(48)))
                 }
-                tray.addView(vDivider())
-                tray.addView(chip("שלם", canvas.eraserMode == EraserMode.WHOLE) { canvas.eraserMode = EraserMode.WHOLE; refresh() })
-                tray.addView(chip("חלקי", canvas.eraserMode == EraserMode.PARTIAL) { canvas.eraserMode = EraserMode.PARTIAL; refresh() })
+                optionsRow.addView(vDivider())
+                optionsRow.addView(chip("מחיקת קו שלם", canvas.eraserMode == EraserMode.WHOLE) { canvas.eraserMode = EraserMode.WHOLE; refresh() })
+                optionsRow.addView(chip("מחיקה חלקית", canvas.eraserMode == EraserMode.PARTIAL) { canvas.eraserMode = EraserMode.PARTIAL; refresh() })
             }
             else -> {
-                val hl = canvas.tool == Tool.HIGHLIGHTER
-                val slots = if (hl) hlSlots else penSlots
-                val sel = if (hl) hlSlot else penSlot
-                slots.forEachIndexed { i, c ->
-                    tray.addView(Swatch(c, i == sel).apply {
-                        layoutParams = LinearLayout.LayoutParams(dp(36), dp(44))
-                        setOnClickListener {
-                            if (i == sel) showPalette(hl) else { if (hl) hlSlot = i else penSlot = i; applyColor(); refresh() }
-                        }
-                    })
+                val ink = inkFor(canvas.tool) ?: return
+                // Colour slots: tap = use, tap the selected one = colour popover, long-press = change / remove.
+                ink.slots.forEachIndexed { i, c ->
+                    val sel = i == ink.slot
+                    val sw = SwatchView(this, c, sel)
+                    sw.setOnClickListener { if (sel) openColors(ink, sw) else { ink.slot = i; ink.save(prefs); applyColor(); refresh() } }
+                    sw.setOnLongClickListener { slotMenu(ink, i, sw); true }
+                    slotViews += sw
+                    optionsRow.addView(sw, LinearLayout.LayoutParams(dp(42), dp(48)))
                 }
-                tray.addView(vDivider())
-                val sizes = if (hl) HL_SIZES else PEN_SIZES
-                val cur = if (hl) canvas.hlSize else canvas.penSize
-                sizes.forEachIndexed { i, sz ->
-                    tray.addView(SizeDot(DOT_RADII[i], sz == cur, slots[sel]).apply {
-                        layoutParams = LinearLayout.LayoutParams(dp(38), dp(44))
-                        setOnClickListener { if (hl) canvas.hlSize = sz else canvas.penSize = sz; refresh() }
-                    })
-                }
-                if (!hl) {
-                    tray.addView(vDivider())
-                    val typeBtn = TextView(this).apply {
-                        text = when (canvas.penType) { NoteCanvasView.PenType.PRESSURE -> "〜"; NoteCanvasView.PenType.MARKER -> "━"; NoteCanvasView.PenType.DASHED -> "╌" }
-                        textSize = 20f; setTextColor(ICON); gravity = Gravity.CENTER
-                        contentDescription = "סוג עט"
+                if (ink.slots.size < MAX_SLOTS) {
+                    val add = ImageButton(this).apply {
+                        setImageResource(R.drawable.ic_add); imageTintList = ColorStateList.valueOf(ICON)
+                        background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0xFFE9ECF1.toInt()) }
+                        contentDescription = "הוספת צבע"
                     }
-                    typeBtn.setOnClickListener { penTypeMenu(typeBtn) }
-                    tray.addView(typeBtn, LinearLayout.LayoutParams(dp(40), dp(44)))
+                    add.setOnClickListener {
+                        ink.slots.add(ink.color); ink.slot = ink.slots.lastIndex; ink.save(prefs); applyColor(); refresh()
+                        optionsRow.post { slotViews.getOrNull(ink.slot)?.let { openColors(ink, it) } }
+                    }
+                    optionsRow.addView(add, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginStart = dp(6); marginEnd = dp(6) })
                 }
+                optionsRow.addView(vDivider())
+                // Width presets: tap = use, tap the selected one = width slider.
+                for (k in 0..2) {
+                    val dot = WidthDot(this, dotRadius(ink, ink.widths[k]), k == ink.widthIdx, ink.color)
+                    dot.contentDescription = "עובי ${ink.widths[k]}"
+                    dot.setOnClickListener {
+                        if (k == ink.widthIdx) showWidthPopover(dot, ink.steps, ink.widths[k]) { v ->
+                            ink.widths[k] = v; ink.save(prefs); applyColor()
+                            dot.dotRadiusDp = dotRadius(ink, v); dot.invalidate()
+                        } else { ink.widthIdx = k; ink.save(prefs); applyColor(); refresh() }
+                    }
+                    optionsRow.addView(dot, LinearLayout.LayoutParams(dp(42), dp(48)))
+                }
+                if (canvas.tool == Tool.PEN) { optionsRow.addView(vDivider()); optionsRow.addView(styleButton()) }
             }
         }
+    }
+
+    private fun setInkColor(ink: InkSettings, c: Int) {
+        ink.slots[ink.slot] = c; ink.save(prefs); prefs.addRecentColor(c); applyColor(); refresh()
+    }
+
+    private fun openColors(ink: InkSettings, anchor: View) {
+        val pages = if (ink === hlInk) listOf(HL_PALETTE) + COLOR_PAGES.drop(1) else COLOR_PAGES
+        ColorPopover(this, pages, ink.color,
+            onPick = { c -> setInkColor(ink, c) },
+            onEyedropper = {
+                Toast.makeText(this, "גע בקו בדף כדי לקחת את הצבע שלו", Toast.LENGTH_SHORT).show()
+                canvas.onColorPicked = { c ->
+                    if (c != null) setInkColor(ink, c)
+                    else Toast.makeText(this, "לא נמצא קו במקום הזה", Toast.LENGTH_SHORT).show()
+                }
+                canvas.startColorPick()
+            },
+            onCustom = { ColorPickerDialog(this, ink.color) { c -> setInkColor(ink, c) }.show() },
+        ).show(anchor)
+    }
+
+    private fun slotMenu(ink: InkSettings, i: Int, anchor: View) {
+        showMenu(anchor, listOf(
+            MenuItem("שינוי הצבע…") { ink.slot = i; applyColor(); refresh(); optionsRow.post { slotViews.getOrNull(i)?.let { openColors(ink, it) } } },
+            MenuItem("הסרת הצבע", danger = true, enabled = ink.slots.size > 1) {
+                ink.slots.removeAt(i)
+                if (ink.slot >= i && ink.slot > 0) ink.slot--
+                ink.slot = ink.slot.coerceIn(0, ink.slots.lastIndex)
+                ink.save(prefs); applyColor(); refresh()
+            },
+        ), minWidthDp = 180)
+    }
+
+    /** The "~ ⌄" button that opens the pen style popover; shows the current line type and effect. */
+    private fun styleButton(): View {
+        val b = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            background = pressable(this@MainActivity, 18f, 0xFFF1F3F6.toInt()); setPadding(dp(10), 0, dp(6), 0)
+            contentDescription = "סגנון העט"
+        }
+        val prev = StylePreview(this, canvas.penType, canvas.penEffect, penInk.color, wave = true, strokeDp = 2.4f)
+        styleBtnPreview = prev
+        b.addView(prev, LinearLayout.LayoutParams(dp(46), dp(26)))
+        b.addView(android.widget.ImageView(this).apply { setImageResource(R.drawable.ic_expand_more); imageTintList = ColorStateList.valueOf(SUB) },
+            LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginStart = dp(2) })
+        b.setOnClickListener {
+            PenStylePopover(this, canvas.penType, canvas.penEffect, canvas.stabilization,
+                onType = { t -> canvas.penType = t; prefs.putStr("pen.type", t.name); updateStylePreview() },
+                onEffect = { e -> canvas.penEffect = e; prefs.putStr("pen.effect", e.name); updateStylePreview() },
+                onStab = { s -> canvas.stabilization = s; prefs.putInt("pen.stab", s) },
+            ).show(b)
+        }
+        b.layoutParams = LinearLayout.LayoutParams(-2, dp(38)).apply { marginStart = dp(6); marginEnd = dp(4) }
+        return b
+    }
+
+    private fun updateStylePreview() {
+        styleBtnPreview?.apply { type = canvas.penType; effect = canvas.penEffect; inkColor = penInk.color; invalidate() }
     }
 
     private fun chip(text: String, on: Boolean, onClick: () -> Unit) = TextView(this).apply {
@@ -428,89 +560,21 @@ class MainActivity : Activity() {
         layoutParams = LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(4); marginEnd = dp(4) }
     }
 
-    /** Full colour grid under the pill; the choice replaces the selected quick slot. */
-    private fun showPalette(hl: Boolean) {
-        val colors = if (hl) HL_PALETTE else PALETTE
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; layoutDirection = View.LAYOUT_DIRECTION_RTL
-            background = card(); elevation = 8 * d
-            setPadding(dp(14), dp(10), dp(14), dp(12))
-        }
-        content.addView(TextView(this).apply { text = "צבעים"; textSize = 14f; setTextColor(SUB) })
-        val grid = GridLayout(this).apply { columnCount = 8 }
-        val pw = PopupWindow(content, -2, -2, true).apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT)); elevation = 8 * d
-        }
-        val current = if (hl) hlSlots[hlSlot] else penSlots[penSlot]
-        for (c in colors) grid.addView(Swatch(c, c == current).apply {
-            layoutParams = GridLayout.LayoutParams().apply { width = dp(40); height = dp(40) }
-            setOnClickListener {
-                if (hl) hlSlots[hlSlot] = c else penSlots[penSlot] = c
-                applyColor(); refresh(); pw.dismiss()
-            }
-        })
-        content.addView(grid, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
-        showUnderPill(pw)
-    }
-
-    /** Shows a popup centred under the tool pill. */
-    private fun showUnderPill(pw: PopupWindow) {
-        val loc = IntArray(2); pill.getLocationInWindow(loc)
-        val cx = loc[0] + pill.width / 2
-        pw.contentView.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
-        val x = (cx - pw.contentView.measuredWidth / 2).coerceAtLeast(dp(8))
-        pw.showAtLocation(pill, Gravity.TOP or Gravity.LEFT, x, loc[1] + pill.height + dp(8))
-    }
-
-    private fun penTypeMenu(anchor: View) {
-        val types = listOf(NoteCanvasView.PenType.PRESSURE to "〜  עט רגיש ללחץ", NoteCanvasView.PenType.MARKER to "━  טוש (עובי קבוע)",
-            NoteCanvasView.PenType.DASHED to "╌  קו מקווקו")
-        showMenu(anchor, types.map { (t, label) -> MenuItem(label, checked = canvas.penType == t) { canvas.penType = t; refresh() } })
-    }
-
     /** Colour grid for recolouring the lasso selection. */
     private fun showRecolor(anchor: View) {
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; layoutDirection = View.LAYOUT_DIRECTION_RTL
-            background = card(); elevation = 8 * d; setPadding(dp(14), dp(10), dp(14), dp(12))
-        }
-        content.addView(TextView(this).apply { text = "צבע לבחירה"; textSize = 14f; setTextColor(SUB) })
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        content.addView(TextView(this).apply { text = "צבע לבחירה"; textSize = 15f; setTextColor(INK); textAlignment = View.TEXT_ALIGNMENT_VIEW_START })
         val grid = GridLayout(this).apply { columnCount = 8 }
-        val pw = PopupWindow(content, -2, -2, true).apply { setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT)); elevation = 8 * d }
-        for (c in PALETTE) grid.addView(Swatch(c, false).apply {
+        var pw: PopupWindow? = null
+        for (c in COLOR_PAGES[0] + COLOR_PAGES[2]) grid.addView(SwatchView(this, c, false, chevron = false).apply {
             layoutParams = GridLayout.LayoutParams().apply { width = dp(40); height = dp(40) }
-            setOnClickListener { canvas.recolorSelection(c); pw.dismiss() }
+            setOnClickListener { canvas.recolorSelection(c); prefs.addRecentColor(c); pw?.dismiss() }
         })
-        content.addView(grid, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
-        pw.showAsDropDown(anchor, 0, dp(6))
+        content.addView(grid, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) })
+        pw = showPopover(anchor, content)
     }
 
-    /** A round colour swatch; ring + small chevron when selected (tap again = full palette). */
-    // Note: the colour parameters are deliberately not called `color` — inside Paint().apply { } that
-    // name would resolve to the Paint's own (black) colour and every swatch would be drawn black.
-    private inner class Swatch(swatch: Int, val selected: Boolean) : View(this@MainActivity) {
-        private val opaque = swatch or 0xFF000000.toInt()
-        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = opaque }
-        private val edge = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1f * d; color = 0x33000000 }
-        private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 2.5f * d; color = ACCENT }
-        private val chev = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE; strokeWidth = 1.8f * d; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
-            val lum = (Color.red(opaque) * 299 + Color.green(opaque) * 587 + Color.blue(opaque) * 114) / 1000
-            color = if (lum > 160) INK else Color.WHITE
-        }
-        private val path = Path()
-        override fun onDraw(c: Canvas) {
-            val cx = width / 2f; val cy = height / 2f
-            c.drawCircle(cx, cy, 11 * d, fill); c.drawCircle(cx, cy, 11 * d, edge)
-            if (selected) {
-                c.drawCircle(cx, cy, 15.5f * d, ring)
-                path.reset(); path.moveTo(cx - 3.5f * d, cy - 1.5f * d); path.lineTo(cx, cy + 2f * d); path.lineTo(cx + 3.5f * d, cy - 1.5f * d)
-                c.drawPath(path, chev)
-            }
-        }
-    }
-
-    /** Tool icon with a small bar under it in the tool's current colour (pen / highlighter). */
+    /** Tool icon with a small bar under it in the tool's current colour (pens / highlighter). */
     private inner class ToolButton : ImageButton(this@MainActivity) {
         var mark = 0
         private val bar = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -522,17 +586,6 @@ class MainActivity : Activity() {
             val w = 14 * d; val h = 3.5f * d; val cx = width / 2f; val y = height - 6.5f * d
             c.drawRoundRect(cx - w / 2, y, cx + w / 2, y + h, h / 2, h / 2, bar)
             if (Color.luminance(bar.color) > 0.8f) c.drawRoundRect(cx - w / 2, y, cx + w / 2, y + h, h / 2, h / 2, barEdge)
-        }
-    }
-
-    /** A width preset: dot of increasing size; soft background when selected. */
-    private inner class SizeDot(val radiusDp: Float, val selected: Boolean, dotColor: Int) : View(this@MainActivity) {
-        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = dotColor or 0xFF000000.toInt() }
-        private val bg = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = ACCENT_SOFT }
-        override fun onDraw(c: Canvas) {
-            val cx = width / 2f; val cy = height / 2f
-            if (selected) c.drawCircle(cx, cy, 17 * d, bg)
-            c.drawCircle(cx, cy, radiusDp * d, fill)
         }
     }
 

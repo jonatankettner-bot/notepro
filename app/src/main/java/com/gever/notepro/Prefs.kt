@@ -18,6 +18,21 @@ class Prefs(ctx: Context) {
     var dockedToolbar get() = b("dockedToolbar", false); set(v) = set("dockedToolbar", v)
     var keepScreenOn get() = b("keepScreenOn", true); set(v) = set("keepScreenOn", v)
 
+    /** Second toolbar row (tool options) hidden. */
+    var toolbarCollapsed get() = b("toolbarCollapsed", false); set(v) = set("toolbarCollapsed", v)
+
+    fun str(k: String, def: String): String = sp.getString(k, def) ?: def
+    fun putStr(k: String, v: String) = sp.edit().putString(k, v).apply()
+    fun int(k: String, def: Int) = sp.getInt(k, def)
+    fun putInt(k: String, v: Int) = sp.edit().putInt(k, v).apply()
+
+    /** Colours picked recently in any colour popover, newest first. */
+    var recentColors: List<Int>
+        get() = str("recentColors", "").split(',').mapNotNull { it.toLongOrNull()?.toInt() }
+        set(v) = putStr("recentColors", v.joinToString(",") { (it.toLong() and 0xFFFFFFFFL).toString() })
+
+    fun addRecentColor(c: Int) { recentColors = (listOf(c) + recentColors.filter { it != c }).take(7) }
+
     var defaultPaper: String get() = sp.getString("defaultPaper", "LINED") ?: "LINED"
         set(v) = sp.edit().putString("defaultPaper", v).apply()
     var defaultPaperColor: Int get() = sp.getInt("defaultPaperColor", -1)

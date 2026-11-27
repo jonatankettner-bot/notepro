@@ -17,14 +17,7 @@ import java.io.File
 import java.util.UUID
 
 /** The brush families NotePro uses. Kept as single instances so a stroke's family can be identified. */
-object Families {
-    val pen = StockBrushes.pressurePen()
-    val marker = StockBrushes.marker()
-    val highlighter = StockBrushes.highlighter()
-    val dashed = StockBrushes.dashedLine()
-    fun code(b: Brush) = when (b.family) { marker -> 1; highlighter -> 2; dashed -> 3; else -> 0 }
-    fun of(code: Int) = when (code) { 1 -> marker; 2 -> highlighter; 3 -> dashed; else -> pen }
-}
+// Brush families and their stored codes live in Brushes.kt (Families).
 
 data class Folder(val id: String, var name: String, var color: Int, var parentId: String?, var emoji: String = "")
 
