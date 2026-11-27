@@ -197,8 +197,51 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
 
     private fun brush(): Brush = when (tool) {
         Tool.HIGHLIGHTER -> Brush.createWithColorIntArgb(Families.highlighter, hlColor, hlSize, 0.1f)
-        else -> Brush.createWithColorIntArgb(
-            if (usePressure) Families.pen else Families.marker, penColor, penSize, 0.05f)
+        else -> Brush.createWithColorIntArgb(when (penType) {
+            PenType.MARKER -> Families.marker
+            PenType.DASHED -> Families.dashed
+            PenType.PRESSURE -> if (usePressure) Families.pen else Families.marker
+        }, penColor, penSize, 0.05f)
+    }
+
+    enum class PenType { PRESSURE, MARKER, DASHED }
+    var penType = PenType.PRESSURE
+    /** Draw, hold the pen still ~0.5 s, lift: a nearly straight stroke becomes a straight line. */
+    var snapLines = true
+
+    private fun straightened(st: Stroke): Stroke? {
+        val inputs = st.inputs; val n = inputs.size
+        if (n < 6) return null
+        val p = StrokeInput()
+        inputs.populate(n - 1, p)
+        val ex = p.x; val ey = p.y; val tEnd = p.elapsedTimeMillis
+        val r = 8 * d / s
+        var j = n - 1
+        while (j > 0) { inputs.populate(j - 1, p); if (kotlin.math.hypot(p.x - ex, p.y - ey) > r) break; j-- }
+        inputs.populate(j, p)
+        if (tEnd - p.elapsedTimeMillis < 450) return null
+        val x1 = p.x; val y1 = p.y
+        inputs.populate(0, p)
+        val x0 = p.x; val y0 = p.y; val t0 = p.elapsedTimeMillis
+        val len = kotlin.math.hypot(x1 - x0, y1 - y0)
+        if (len < 30 * d / s) return null
+        var maxDev = 0f; val pressures = ArrayList<Float>()
+        for (k in 0..j) {
+            inputs.populate(k, p)
+            val dev = kotlin.math.abs((y1 - y0) * p.x - (x1 - x0) * p.y + x1 * y0 - y1 * x0) / len
+            maxDev = maxOf(maxDev, dev); pressures.add(p.pressure)
+        }
+        if (maxDev > maxOf(0.07f * len, 10 * d / s)) return null
+        pressures.sort(); val pr = pressures[pressures.size / 2]
+        inputs.populate(0, p)
+        val tool = p.toolType; val unit = p.strokeUnitLengthCm; val tilt = p.tiltRadians; val ori = p.orientationRadians
+        val batch = MutableStrokeInputBatch(); val steps = 24
+        for (k in 0..steps) {
+            val f = k / steps.toFloat()
+            p.update(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f, t0 + k * 8L, tool, unit, pr, tilt, ori)
+            batch.add(p)
+        }
+        return Stroke(st.brush, batch.toImmutable())
     }
 
     private fun onInput(e: MotionEvent): Boolean {
@@ -350,7 +393,8 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         if (b == null) RectF() else RectF(b.xMin, b.yMin, b.xMax, b.yMax)
     }
 
-    private fun commit(st: Stroke) {
+    private fun commit(raw: Stroke) {
+        val st = (if (snapLines) runCatching { straightened(raw) }.getOrNull() else null) ?: raw
         strokes.add(st)
         val b = boundsOf(st)
         val lastPageTouched = floor((b.bottom - GAP) / (PAGE_H + GAP)).toInt()

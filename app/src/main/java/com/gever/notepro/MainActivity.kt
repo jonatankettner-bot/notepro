@@ -347,6 +347,16 @@ class MainActivity : Activity() {
                         setOnClickListener { if (hl) canvas.hlSize = sz else canvas.penSize = sz; refresh() }
                     })
                 }
+                if (!hl) {
+                    tray.addView(vDivider())
+                    val typeBtn = TextView(this).apply {
+                        text = when (canvas.penType) { NoteCanvasView.PenType.PRESSURE -> "〜"; NoteCanvasView.PenType.MARKER -> "━"; NoteCanvasView.PenType.DASHED -> "╌" }
+                        textSize = 20f; setTextColor(ICON); gravity = Gravity.CENTER
+                        contentDescription = "סוג עט"
+                    }
+                    typeBtn.setOnClickListener { penTypeMenu(typeBtn) }
+                    tray.addView(typeBtn, LinearLayout.LayoutParams(dp(40), dp(44)))
+                }
             }
         }
     }
@@ -384,6 +394,17 @@ class MainActivity : Activity() {
         content.addView(grid, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(6) })
         content.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
         pw.showAsDropDown(pill, (pill.width - content.measuredWidth) / 2, dp(8))
+    }
+
+    private fun penTypeMenu(anchor: View) {
+        val pm = PopupMenu(this, anchor)
+        val types = listOf(NoteCanvasView.PenType.PRESSURE to "〜  עט רגיש ללחץ", NoteCanvasView.PenType.MARKER to "━  טוש (עובי קבוע)",
+            NoteCanvasView.PenType.DASHED to "╌  קו מקווקו")
+        types.forEachIndexed { i, (_, label) -> pm.menu.add(1, i, i, label) }
+        pm.menu.setGroupCheckable(1, true, true)
+        types.forEachIndexed { i, (t, _) -> pm.menu.getItem(i).isChecked = canvas.penType == t }
+        pm.setOnMenuItemClickListener { canvas.penType = types[it.itemId].first; refresh(); true }
+        pm.show()
     }
 
     /** Colour grid for recolouring the lasso selection. */
@@ -469,6 +490,7 @@ class MainActivity : Activity() {
         val menu = pm.menu
         menu.add(0, 7, 0, "תבנית נייר…")
         menu.add(0, 8, 1, "חזרה אוטומטית מהמחק").setCheckable(true).isChecked = autoDeselectEraser
+        menu.add(0, 9, 1, "קו ישר בהחזקת העט").setCheckable(true).isChecked = canvas.snapLines
         menu.add(0, 3, 2, "לחץ עט").setCheckable(true).isChecked = canvas.usePressure
         menu.add(0, 4, 3, "חיזוי תנועה").setCheckable(true).isChecked = canvas.usePrediction
         menu.add(0, 5, 4, "אצבע כותבת").setCheckable(true).isChecked = canvas.fingerDraws
@@ -484,6 +506,7 @@ class MainActivity : Activity() {
                 5 -> canvas.fingerDraws = !canvas.fingerDraws
                 7 -> showPaperDialog()
                 8 -> autoDeselectEraser = !autoDeselectEraser
+                9 -> canvas.snapLines = !canvas.snapLines
             }
             true
         }
