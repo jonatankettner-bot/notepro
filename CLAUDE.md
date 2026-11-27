@@ -31,6 +31,21 @@ The owner is a chemistry undergraduate; the app is mainly for lecture notes and 
   installs it through PackageInstaller; Android asks the user to confirm.
 - So: to ship a change, commit and push to `main`. Make sure it compiles first (`./gradlew assembleDebug`).
 
+## Building in a fresh cloud session
+The Android SDK is not preinstalled. Gradle and Java 17+ usually are. Install the SDK once per session:
+```bash
+export ANDROID_HOME=/opt/android-sdk && mkdir -p $ANDROID_HOME/cmdline-tools && cd /tmp
+curl -sO https://dl.google.com/android/repository/commandlinetools-linux-16111833_latest.zip
+unzip -q -o commandlinetools-linux-16111833_latest.zip -d $ANDROID_HOME/cmdline-tools
+mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
+yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null
+$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "platforms;android-36" "build-tools;36.0.0"
+echo "sdk.dir=$ANDROID_HOME" > <repo>/local.properties   # local.properties is git-ignored
+```
+Then `./gradlew assembleDebug`. Maven Central sometimes answers 429 through the proxy — wait a minute and retry.
+There is no emulator: the owner tests on the tablet, so describe what to check after each release.
+Docs-only commits: add `[skip ci]` to the commit message so no empty release is published.
+
 ## Roadmap (agreed order; adjust with the owner)
 1. ~~Writing canvas test~~ — done (pen, pressure, prediction, palm rejection, stroke eraser, undo/redo).
 2. ~~Pages~~ — first version done: continuous vertical pages (A4 ratio, world units 1000x1414), finger scroll/fling,
