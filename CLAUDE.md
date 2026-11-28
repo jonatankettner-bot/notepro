@@ -107,7 +107,11 @@ drive it with `adb shell input tap/stylus swipe`, and check screens with `adb ex
   ≤2048 px, EXIF-upright), stickers (emoji in 4 topics, drawn as bitmaps) and sticky notes (coloured card
   with text). Saved in notes/<id>/items.json. On the canvas (NoteCanvasView "page items"): a finger tap
   selects, then drag to move, corners to resize (notes: free w/h; others keep aspect), the ↻ handle to rotate
-  (snaps to 15°); the lasso pen picks items up directly. Floating menu in MainActivity (edit / colour for
+  (snaps to 15°). Lasso (owner's rule, 2026-11-28): it selects anything it touches even slightly — ink with a
+  point inside the loop or crossed by the lasso line, items overlapping it (`lassoPick`) — and moves /
+  scales / duplicates / deletes ink and items together as one undo step (`Act.Group`). The "בוחר הכול ▾"
+  chip filters what it picks (handwriting, highlighter, shapes, pictures+stickers, sticky notes; saved in
+  prefs "lasso.kinds"). Floating menu in MainActivity (edit / colour for
   notes, duplicate, delete). Every change is one `Act.Items` undo step. New items go to a free spot that is
   on screen (`freeSpot`), and the view scrolls to anything placed off screen (`bringIntoView`).
   The shapes tool button (MainActivity `shapesPopover`) places ready perfect shapes with the pen's settings.

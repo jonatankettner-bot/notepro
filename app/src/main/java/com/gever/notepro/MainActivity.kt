@@ -169,7 +169,7 @@ class MainActivity : Activity() {
                 val w = selMenu.measuredWidth; val h = selMenu.measuredHeight
                 selMenu.translationX = (r.centerX() - w / 2f).coerceIn(dp(8).toFloat(), (root.width - w - dp(8)).toFloat().coerceAtLeast(0f))
                 val above = r.top - h - dp(16)
-                selMenu.translationY = if (above > dp(90)) above else (r.bottom + dp(16)).coerceAtMost((root.height - h - dp(8)).toFloat())
+                selMenu.translationY = if (above > barBottom()) above else (r.bottom + dp(16)).coerceAtMost((root.height - h - dp(8)).toFloat())
             }
         }
 
@@ -194,7 +194,7 @@ class MainActivity : Activity() {
                 val w = itemMenu.measuredWidth; val h = itemMenu.measuredHeight
                 itemMenu.translationX = (r.centerX() - w / 2f).coerceIn(dp(8).toFloat(), (root.width - w - dp(8)).toFloat().coerceAtLeast(0f))
                 val above = r.top - h - dp(16)
-                itemMenu.translationY = if (above > dp(140)) above else (r.bottom + dp(60)).coerceAtMost((root.height - h - dp(8)).toFloat())
+                itemMenu.translationY = if (above > barBottom()) above else (r.bottom + dp(60)).coerceAtMost((root.height - h - dp(8)).toFloat())
             }
         }
 
@@ -327,6 +327,12 @@ class MainActivity : Activity() {
 
     private fun card() = rounded(CARD, 22f).apply { setStroke(1, LINE) }
 
+    /** Lowest y (in the window) that a floating menu may use without covering the toolbar. */
+    private fun barBottom(): Float {
+        val loc = IntArray(2); pill.getLocationInWindow(loc)
+        return (loc[1] + pill.height + dp(8)).toFloat()
+    }
+
     private fun vDivider() = View(this).apply {
         setBackgroundColor(LINE)
         layoutParams = LinearLayout.LayoutParams(1, dp(26)).apply { marginStart = dp(8); marginEnd = dp(8) }
@@ -389,6 +395,10 @@ class MainActivity : Activity() {
         canvas.penEffect = runCatching { PenEffect.valueOf(prefs.str("pen.effect", "NONE")) }.getOrDefault(PenEffect.NONE)
         canvas.stabilization = prefs.int("pen.stab", 0).coerceIn(0, 10)
         canvas.tool = runCatching { Tool.valueOf(prefs.str("tool", "PEN")) }.getOrDefault(Tool.PEN)
+        prefs.str("lasso.kinds", "").takeIf { it.isNotEmpty() }?.let { s ->
+            canvas.lassoKinds.clear()
+            for (n in s.split(',')) runCatching { canvas.lassoKinds.add(NoteCanvasView.SelKind.valueOf(n)) }
+        }
         collapsed = prefs.toolbarCollapsed
     }
 
@@ -478,6 +488,11 @@ class MainActivity : Activity() {
             Tool.LASSO -> {
                 optionsRow.addView(chip("חופשי", canvas.lassoMode == NoteCanvasView.LassoMode.FREEFORM) { canvas.lassoMode = NoteCanvasView.LassoMode.FREEFORM; refresh() })
                 optionsRow.addView(chip("מלבן", canvas.lassoMode == NoteCanvasView.LassoMode.RECT) { canvas.lassoMode = NoteCanvasView.LassoMode.RECT; refresh() })
+                optionsRow.addView(vDivider())
+                val all = canvas.lassoKinds.size == NoteCanvasView.SelKind.values().size
+                lateinit var filterChip: View
+                filterChip = chip(if (all) "בוחר הכול ▾" else "בוחר ${canvas.lassoKinds.size} סוגים ▾", !all) { lassoFilter(filterChip) }
+                optionsRow.addView(filterChip)
             }
             Tool.ERASER -> {
                 ERASER_SIZES.forEachIndexed { i, r ->
@@ -587,6 +602,40 @@ class MainActivity : Activity() {
 
     private fun updateStylePreview() {
         styleBtnPreview?.apply { type = canvas.penType; effect = canvas.penEffect; inkColor = penInk.color; invalidate() }
+    }
+
+    /** What the lasso may select: one switch per kind of thing on the page. */
+    private fun lassoFilter(anchor: View) {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(TextView(this).apply {
+            text = "מה הלאסו בוחר"; textSize = 17f; setTextColor(INK); typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            textAlignment = View.TEXT_ALIGNMENT_VIEW_START
+        })
+        col.addView(TextView(this).apply {
+            text = "מספיק לגעת בקצה של משהו כדי לבחור אותו"; textSize = 12f; setTextColor(SUB); textAlignment = View.TEXT_ALIGNMENT_VIEW_START
+        }, LinearLayout.LayoutParams(-2, -2).apply { bottomMargin = dp(6) })
+        val kinds = listOf(
+            NoteCanvasView.SelKind.HANDWRITING to "כתב יד",
+            NoteCanvasView.SelKind.HIGHLIGHTER to "מרקר הדגשה",
+            NoteCanvasView.SelKind.SHAPE to "צורות",
+            NoteCanvasView.SelKind.PICTURE to "תמונות ומדבקות",
+            NoteCanvasView.SelKind.NOTE to "פתקים דביקים",
+        )
+        for ((k, label) in kinds) col.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, dp(4))
+            addView(TextView(this@MainActivity).apply { text = label; textSize = 15f; setTextColor(INK) }, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(android.widget.Switch(this@MainActivity).apply {
+                isChecked = k in canvas.lassoKinds; accent()
+                setOnCheckedChangeListener { _, on ->
+                    if (on) canvas.lassoKinds.add(k) else canvas.lassoKinds.remove(k)
+                    prefs.putStr("lasso.kinds", canvas.lassoKinds.joinToString(",") { it.name }.ifEmpty { "NONE" })
+                    canvas.clearSelection()
+                }
+            })
+        }, LinearLayout.LayoutParams(dp(260), -2))
+        val pw = showPopover(anchor, col)
+        pw.setOnDismissListener { refresh() }
     }
 
     private fun chip(text: String, on: Boolean, onClick: () -> Unit) = TextView(this).apply {

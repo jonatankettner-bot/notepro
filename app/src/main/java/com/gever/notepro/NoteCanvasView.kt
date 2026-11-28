@@ -107,6 +107,8 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                    val marksBefore: Set<Int>? = null, val marksAfter: Set<Int>? = null) : Act()
         /** A change to the page items (pictures, stickers, notes): the whole list before and after. */
         class Items(val before: List<PageItem>, val after: List<PageItem>) : Act()
+        /** Several changes made by one action (e.g. moving a lasso selection of ink and pictures). */
+        class Group(val acts: List<Act>) : Act()
     }
     private val undoS = ArrayDeque<Act>()
     private val redoS = ArrayDeque<Act>()
@@ -193,7 +195,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         m.setScale(s, s); m.postTranslate(tx, ty); m.invert(inv)
         layer.invalidate()
         reportPage()
-        if (selection.isNotEmpty() && drag == Drag.NONE) notifySelection()
+        if (!selEmpty() && drag == Drag.NONE) notifySelection()
         if (selItem != null) notifyItem()
     }
 
@@ -600,6 +602,11 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         exitEdit(); deselectItem()
         clearSelection()
         val a = undoS.removeLastOrNull() ?: return
+        undoAct(a)
+        redoS.addLast(a); dirty = true; layer.invalidate(); onHistoryChanged?.invoke()
+    }
+
+    private fun undoAct(a: Act) {
         when (a) {
             is Act.Add -> strokes.remove(a.s)
             is Act.Edit -> {
@@ -610,14 +617,11 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                 if (a.pagesBefore > 0) clampAndApply()
             }
             is Act.Items -> { items.clear(); items.addAll(a.before.map { it.copy() }) }
+            is Act.Group -> for (x in a.acts.asReversed()) undoAct(x)
         }
-        redoS.addLast(a); dirty = true; layer.invalidate(); onHistoryChanged?.invoke()
     }
 
-    fun redo() {
-        exitEdit(); deselectItem()
-        clearSelection()
-        val a = redoS.removeLastOrNull() ?: return
+    private fun redoAct(a: Act) {
         when (a) {
             is Act.Add -> strokes.add(a.s)
             is Act.Edit -> {
@@ -628,7 +632,15 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                 if (a.pagesAfter > 0) clampAndApply()
             }
             is Act.Items -> { items.clear(); items.addAll(a.after.map { it.copy() }) }
+            is Act.Group -> for (x in a.acts) redoAct(x)
         }
+    }
+
+    fun redo() {
+        exitEdit(); deselectItem()
+        clearSelection()
+        val a = redoS.removeLastOrNull() ?: return
+        redoAct(a)
         undoS.addLast(a); dirty = true; layer.invalidate(); onHistoryChanged?.invoke()
     }
 
@@ -1059,10 +1071,14 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         val sx = w + 40f; val sy = h + 40f
         val offs = listOf(0f to 0f, 1f to 0f, -1f to 0f, 0f to 1f, 0f to -1f, 1f to 1f, -1f to 1f, 1f to -1f, -1f to -1f, 2f to 0f, -2f to 0f, 0f to 2f)
         val taken = items.map { it.bounds() } + strokes.map { boundsOf(it) }
-        for ((ox, oy) in offs) {
+        val a = toWorld(0f, topInset); val b = toWorld(width.toFloat(), height.toFloat())
+        val screen = RectF(a[0], a[1], b[0], b[1])
+        // First only spots fully on screen, then anywhere around (the view then scrolls to it).
+        for (onScreen in listOf(true, false)) for ((ox, oy) in offs) {
             val x = c[0] + ox * sx; val y = c[1] + oy * sy
             if (x - w / 2 < 10f || x + w / 2 > PAGE_W - 10f) continue
             val r = RectF(x - w / 2 - 10, y - h / 2 - 10, x + w / 2 + 10, y + h / 2 + 10)
+            if (onScreen && !screen.contains(r)) continue
             if (taken.none { RectF.intersects(it, r) }) return floatArrayOf(x, y)
         }
         return c
@@ -1073,8 +1089,22 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         val before = snapshotItems()
         items.add(it)
         growPagesForRect(it.bounds())
+        bringIntoView(it.bounds())
         selItem = it
         pushItems(before)
+    }
+
+    /** Scrolls so that the world rect r is on screen (when it is not already). */
+    private fun bringIntoView(r: RectF) {
+        val v = RectF(r); m.mapRect(v)
+        val margin = 24 * d
+        val dy = when {
+            v.top < topInset + margin -> topInset + margin - v.top
+            v.bottom > height - margin -> height - margin - v.bottom
+            else -> 0f
+        }
+        if (dy == 0f) return
+        scroller.forceFinished(true); ty += dy; clampAndApply()
     }
 
     /** Changes the selected item (text, colour ...) as one undo step. */
@@ -1140,18 +1170,13 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
             return true
         }
         if (e.actionMasked != MotionEvent.ACTION_DOWN) return false
-        val pen = isPen(e.getToolType(0))
         // On the selected item: drag a corner, the rotate handle or the item itself (pen or finger).
         if (selItem != null) {
             val h = itemHit(e.x, e.y)
             if (h != IDrag.NONE) { beginItemDrag(h, e); return true }
             deselectItem()
         }
-        // With the selection tool the pen picks items up directly.
-        if (pen && tool == Tool.LASSO) {
-            val it = itemAt(e.x, e.y) ?: return false
-            selItem = it; beginItemDrag(IDrag.MOVE, e); return true
-        }
+        // With the selection tool the lasso itself catches items (lassoPick), so a lasso can start on a picture.
         return false
     }
 
@@ -1227,6 +1252,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         exitEdit(); clearSelection(); deselectItem()
         val st = strokeOf(sh, if (tool == Tool.HIGHLIGHTER) brush() else penBrush(), 0.6f) ?: return
         strokes.add(st); shapes[st] = sh.copy(); growPagesFor(listOf(st)); push(Act.Add(st))
+        bringIntoView(boundsOf(st))
         editStroke = st; editShape = sh; layer.invalidate()
     }
 
@@ -1239,15 +1265,29 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     private var drag = Drag.NONE
     private val lassoPts = ArrayList<Float>()          // world x,y pairs
     private val selection = mutableListOf<Stroke>()
+    /** Pictures / stickers / sticky notes caught by the lasso (references into `items`). */
+    private val selItems = mutableListOf<PageItem>()
     private val selBounds = RectF()
     private var dragX0 = 0f; private var dragY0 = 0f
     private var selDx = 0f; private var selDy = 0f; private var selK = 1f
-    val hasSelection get() = selection.isNotEmpty()
+    val hasSelection get() = !selEmpty()
+    private fun selEmpty() = selection.isEmpty() && selItems.isEmpty()
+
+    /** What the lasso may pick up (the filter in the lasso options). */
+    enum class SelKind { HANDWRITING, HIGHLIGHTER, SHAPE, PICTURE, NOTE }
+    val lassoKinds: MutableSet<SelKind> = java.util.EnumSet.allOf(SelKind::class.java)
+
+    private fun kindOf(st: Stroke) = when {
+        shapes[st] != null -> SelKind.SHAPE
+        st.brush.family == Families.highlighter -> SelKind.HIGHLIGHTER
+        else -> SelKind.HANDWRITING
+    }
+    private fun kindOf(it: PageItem) = if (it.type == ItemType.NOTE) SelKind.NOTE else SelKind.PICTURE
 
     private fun lassoDown(x: Float, y: Float) {
         val w = toWorld(x, y)
         dragX0 = w[0]; dragY0 = w[1]; selDx = 0f; selDy = 0f; selK = 1f
-        if (selection.isNotEmpty()) {
+        if (!selEmpty()) {
             val hr = 24 * d / s
             if (kotlin.math.hypot(w[0] - selBounds.right, w[1] - selBounds.bottom) < hr) { drag = Drag.RESIZE; return }
             val pad = 10 * d / s
@@ -1283,24 +1323,93 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                     floatArrayOf(x0, y0, x1, y0, x1, y1, x0, y1)
                 } else lassoPts.toFloatArray()
                 lassoPts.clear()
-                if (poly.size >= 6) {
-                    val p = StrokeInput()
-                    for (st in strokes) {
-                        val inputs = st.inputs; var inside = 0
-                        for (k in 0 until inputs.size) { inputs.populate(k, p); if (pointInPoly(p.x, p.y, poly)) inside++ }
-                        if (inputs.size > 0 && inside * 2 >= inputs.size) selection.add(st)
-                    }
-                }
+                lassoPick(poly, lassoMode == LassoMode.RECT)
                 updateSelBounds()
             }
             Drag.MOVE, Drag.RESIZE -> if (selDx != 0f || selDy != 0f || selK != 1f) {
                 val ax = selBounds.left; val ay = selBounds.top; val k = selK; val dx = selDx; val dy = selDy
-                replaceSelection({ st -> transformed(st, ax, ay, k, dx, dy) }) { sh -> sh.transform(ax, ay, k, dx, dy) }
+                var itemsAct: Act? = null
+                if (selItems.isNotEmpty()) {
+                    val before = snapshotItems()
+                    for (it in selItems) { it.cx = ax + (it.cx - ax) * k + dx; it.cy = ay + (it.cy - ay) * k + dy; it.w *= k; it.h *= k }
+                    for (it in selItems) growPagesForRect(it.bounds())
+                    itemsAct = Act.Items(before, snapshotItems())
+                }
+                replaceSelection({ st -> transformed(st, ax, ay, k, dx, dy) }, { sh -> sh.transform(ax, ay, k, dx, dy) }, itemsAct)
             }
             Drag.NONE -> {}
         }
         drag = Drag.NONE; selDx = 0f; selDy = 0f; selK = 1f
         layer.invalidate(); notifySelection()
+    }
+
+    /**
+     * Selects everything the lasso touches, even a little: ink with a point inside the loop or crossed by
+     * the lasso line, and items overlapping it. A short tap picks what is under the pen. Honors lassoKinds.
+     * poly = the lasso's points (world); closedRect = it is the rectangle mode's 4 corners.
+     */
+    private fun lassoPick(poly: FloatArray, closedRect: Boolean) {
+        if (poly.size < 2) return
+        val area = poly.size >= 6
+        val pb = RectF(poly[0], poly[1], poly[0], poly[1])
+        var i = 2; while (i < poly.size) { pb.union(poly[i], poly[i + 1]); i += 2 }
+        val tol = 8 * u
+        // The lasso line as segments (the rectangle is closed; the free loop only where it was drawn).
+        val segs = ArrayList<FloatArray>()
+        if (poly.size == 2) segs.add(floatArrayOf(poly[0], poly[1], poly[0], poly[1]))
+        i = 0; while (i + 3 < poly.size) { segs.add(floatArrayOf(poly[i], poly[i + 1], poly[i + 2], poly[i + 3])); i += 2 }
+        if (closedRect && poly.size >= 4) segs.add(floatArrayOf(poly[poly.size - 2], poly[poly.size - 1], poly[0], poly[1]))
+
+        val p = StrokeInput()
+        for (st in strokes) {
+            if (kindOf(st) !in lassoKinds) continue
+            val r = st.brush.size / 2 + tol
+            val b = RectF(boundsOf(st)); b.inset(-r, -r)
+            if (!RectF.intersects(b, pb)) continue
+            val inputs = st.inputs; if (inputs.size == 0) continue
+            var hit = false
+            var px = 0f; var py = 0f
+            for (k in 0 until inputs.size) {
+                inputs.populate(k, p)
+                if (area && pointInPoly(p.x, p.y, poly)) { hit = true; break }
+                val x0 = if (k == 0) p.x else px; val y0 = if (k == 0) p.y else py
+                for (sg in segs) if (segDist(x0, y0, p.x, p.y, sg[0], sg[1], sg[2], sg[3]) < r) { hit = true; break }
+                if (hit) break
+                px = p.x; py = p.y
+            }
+            if (hit) selection.add(st)
+        }
+        for (it in items) {
+            if (kindOf(it) !in lassoKinds) continue
+            val c = it.corners()
+            var hit = false
+            if (area) { var k = 0; while (k < 8) { if (pointInPoly(c[k], c[k + 1], poly)) { hit = true; break }; k += 2 } }
+            if (!hit) { var k = 0; while (k < poly.size) { if (it.contains(poly[k], poly[k + 1], tol)) { hit = true; break }; k += 2 } }
+            if (!hit) for (sg in segs) {
+                for (e in 0 until 4) {
+                    val a = e * 2; val bI = ((e + 1) % 4) * 2
+                    if (segDist(c[a], c[a + 1], c[bI], c[bI + 1], sg[0], sg[1], sg[2], sg[3]) < tol) { hit = true; break }
+                }
+                if (hit) break
+            }
+            if (hit) selItems.add(it)
+        }
+    }
+
+    /** Distance between segments ab and cd (0 when they cross). */
+    private fun segDist(ax: Float, ay: Float, bx: Float, by: Float, cx: Float, cy: Float, dx: Float, dy: Float): Float {
+        fun cross(ox: Float, oy: Float, px: Float, py: Float, qx: Float, qy: Float) = (px - ox) * (qy - oy) - (py - oy) * (qx - ox)
+        val d1 = cross(cx, cy, dx, dy, ax, ay); val d2 = cross(cx, cy, dx, dy, bx, by)
+        val d3 = cross(ax, ay, bx, by, cx, cy); val d4 = cross(ax, ay, bx, by, dx, dy)
+        if (((d1 > 0) != (d2 > 0)) && ((d3 > 0) != (d4 > 0)) && d1 != 0f && d2 != 0f && d3 != 0f && d4 != 0f) return 0f
+        return minOf(minOf(ptSeg(ax, ay, cx, cy, dx, dy), ptSeg(bx, by, cx, cy, dx, dy)),
+            minOf(ptSeg(cx, cy, ax, ay, bx, by), ptSeg(dx, dy, ax, ay, bx, by)))
+    }
+
+    private fun ptSeg(px: Float, py: Float, ax: Float, ay: Float, bx: Float, by: Float): Float {
+        val vx = bx - ax; val vy = by - ay; val l2 = vx * vx + vy * vy
+        val t = if (l2 == 0f) 0f else (((px - ax) * vx + (py - ay) * vy) / l2).coerceIn(0f, 1f)
+        return kotlin.math.hypot(px - (ax + t * vx), py - (ay + t * vy))
     }
 
     private fun pointInPoly(x: Float, y: Float, poly: FloatArray): Boolean {
@@ -1316,6 +1425,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     private fun updateSelBounds() {
         selBounds.setEmpty()
         for (st in selection) { val b = boundsOf(st); if (selBounds.isEmpty) selBounds.set(b) else selBounds.union(b) }
+        for (it in selItems) { val b = it.bounds(); if (selBounds.isEmpty) selBounds.set(b) else selBounds.union(b) }
     }
 
     private fun transformed(st: Stroke, ax: Float, ay: Float, k: Float, dx: Float, dy: Float, color: Int? = null): Stroke {
@@ -1332,7 +1442,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     }
 
     /** Replaces every selected stroke by f(stroke), as one undoable step; the new strokes stay selected. */
-    private fun replaceSelection(f: (Stroke) -> Stroke, g: (Shape) -> Unit = {}) {
+    private fun replaceSelection(f: (Stroke) -> Stroke, g: (Shape) -> Unit = {}, extra: Act? = null) {
         val removed = mutableListOf<Pair<Stroke, Int>>(); val added = mutableListOf<Stroke>()
         for (st in selection) { val k = strokes.indexOf(st); if (k >= 0) removed += st to k }
         removed.sortBy { it.second }
@@ -1344,7 +1454,8 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         strokes.addAll(added)
         selection.clear(); selection.addAll(added); updateSelBounds()
         growPagesFor(added)
-        push(Act.Edit(removed, added))
+        val edit = Act.Edit(removed, added)
+        push(if (extra != null) Act.Group(listOf(edit, extra)) else edit)
         layer.invalidate()
     }
 
@@ -1355,15 +1466,21 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     }
 
     fun clearSelection() {
-        if (selection.isEmpty() && lassoPts.isEmpty()) return
-        selection.clear(); lassoPts.clear(); selBounds.setEmpty(); layer.invalidate(); notifySelection()
+        if (selEmpty() && lassoPts.isEmpty()) return
+        selection.clear(); selItems.clear(); lassoPts.clear(); selBounds.setEmpty(); layer.invalidate(); notifySelection()
     }
+
+    /** One undo step for a stroke change plus (when items took part) an items change. */
+    private fun pushWithItems(edit: Act, itemsBefore: List<PageItem>?) =
+        push(if (itemsBefore != null) Act.Group(listOf(edit, Act.Items(itemsBefore, snapshotItems()))) else edit)
 
     fun deleteSelection() {
         val removed = selection.mapNotNull { st -> strokes.indexOf(st).takeIf { it >= 0 }?.let { st to it } }.sortedBy { it.second }
         for (r in removed.asReversed()) strokes.removeAt(r.second)
-        push(Act.Edit(removed, emptyList()))
-        selection.clear(); selBounds.setEmpty(); layer.invalidate(); notifySelection()
+        val itemsBefore = if (selItems.isNotEmpty()) snapshotItems() else null
+        items.removeAll { x -> selItems.any { it === x } }
+        pushWithItems(Act.Edit(removed, emptyList()), itemsBefore)
+        selection.clear(); selItems.clear(); selBounds.setEmpty(); layer.invalidate(); notifySelection()
     }
 
     fun duplicateSelection() {
@@ -1372,8 +1489,12 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
             transformed(st, 0f, 0f, 1f, off, off).also { n -> shapes[st]?.let { shapes[n] = it.copy().apply { translate(off, off) } } }
         }
         strokes.addAll(copies); growPagesFor(copies)
-        push(Act.Edit(emptyList(), copies))
-        selection.clear(); selection.addAll(copies); updateSelBounds(); layer.invalidate(); notifySelection()
+        val itemsBefore = if (selItems.isNotEmpty()) snapshotItems() else null
+        val itemCopies = selItems.map { it.copy(java.util.UUID.randomUUID().toString()).apply { cx += off; cy += off } }
+        items.addAll(itemCopies); for (it in itemCopies) growPagesForRect(it.bounds())
+        pushWithItems(Act.Edit(emptyList(), copies), itemsBefore)
+        selection.clear(); selection.addAll(copies); selItems.clear(); selItems.addAll(itemCopies)
+        updateSelBounds(); layer.invalidate(); notifySelection()
     }
 
     /** Recolours the selection; highlighter strokes keep their transparency. */
@@ -1383,7 +1504,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     })
 
     private fun notifySelection(hideMenu: Boolean = false) {
-        if (selection.isEmpty() || hideMenu) { onSelectionChanged?.invoke(null); return }
+        if (selEmpty() || hideMenu) { onSelectionChanged?.invoke(null); return }
         val r = RectF(selBounds); m.mapRect(r); onSelectionChanged?.invoke(r)
     }
 
@@ -1483,8 +1604,12 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                 c.drawRect(page, pagePaint)
                 drawPattern(c, page)
             }
-            for (it in items) { val b = it.bounds(); if (b.bottom >= visTop && b.top <= visBottom) itemPainter.draw(c, it) }   // under the ink, so it can be written on
-            val moving = selection.isNotEmpty() && (selDx != 0f || selDy != 0f || selK != 1f)
+            val moving = !selEmpty() && (selDx != 0f || selDy != 0f || selK != 1f)
+            val selT = Matrix().apply { setScale(selK, selK, selBounds.left, selBounds.top); postTranslate(selDx, selDy) }
+            for (it in items) {   // under the ink, so it can be written on
+                if (moving && selItems.any { s -> s === it }) { c.save(); c.concat(selT); itemPainter.draw(c, it); c.restore(); continue }
+                val b = it.bounds(); if (b.bottom >= visTop && b.top <= visBottom) itemPainter.draw(c, it)
+            }
             for (st in strokes) {
                 val b = boundsOf(st)
                 if (b.bottom < visTop || b.top > visBottom || b.right < visLeft || b.left > visRight) continue
@@ -1492,8 +1617,8 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                 renderer.draw(c, st, m)
             }
             preview?.let { renderer.draw(c, it, m) }   // the snapped shape while the pen is still down
-            if (selection.isNotEmpty()) {
-                val t = Matrix().apply { setScale(selK, selK, selBounds.left, selBounds.top); postTranslate(selDx, selDy) }
+            if (!selEmpty()) {
+                val t = selT
                 if (moving) {
                     c.save(); c.concat(t)
                     val full = Matrix(m).apply { preConcat(t) }
