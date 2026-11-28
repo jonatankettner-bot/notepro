@@ -265,6 +265,59 @@ Order chosen so each step is usable on its own and ships separately:
 7. **Note covers + template gallery** (simple: our own covers and paper templates).
 8. Audio recording + playback row (round 3 unless time allows).
 
+## Round 3 research: the tools still marked "coming soon" (2026-11-28)
+Videos: mUyzQaxaEvE (quick text boxes, iPad, 2026-03), YQIVLVWuOFU (text box, web, 2026-01),
+DGu_1LlPhM4 (shapes, 2026-01), 7iTtWkYrpJQ (complete guide, iPad, 2025-09), mnSwh6rOLm8 (hide toolbar,
+phone, 2025-08). Text only, layout only.
+
+### Text tool (`Tt`)
+- Tap `Tt` and tap the page = a text line at that spot; the keyboard opens with a **formatting strip**
+  above it: paragraph style (Body / Title / Heading / Caption), font, size with − / + buttons, colour dot,
+  **B I U**, bullet / numbered list, checklist, alignment, and a gear at its end.
+- The gear opens "Text" settings: **Quick text boxes** (switch) and the quick-box style:
+  *Draw text boxes* (drag diagonally with the pen to make a box) or *Scribble* (handwriting in the box is
+  converted to typed text).
+- A free text box has a floating bar when selected (edit, copy, duplicate, move, delete) and a
+  **background** popover: fill style (none / solid / light / stripes) + the colour grid. A text box with
+  a yellow fill is how Notability makes a "sticky note".
+
+### Insert `+` / media
+- `+` opens a list: photo from gallery, camera, file / PDF, **GIF / sticker picker** (a panel with a
+  search box and a "trending" grid), math. Images can also be dragged in from other apps.
+- Inserted images and stickers are objects: move, resize from the corners, rotate, delete.
+
+### Sticky note
+- A coloured square note placed on the page that holds text (and can be moved / resized). In practice the
+  same object as a text box with a fill colour; we can build it as a preset of the text box.
+
+### Shapes
+- Confirms what we built in v7: draw + hold = perfect shape with 4 handles. Notability's shapes tool also
+  shows "Freeform / Round" chips in its second row (corner style of drawn shapes).
+
+### More tools behind `>`
+- **Magnifier** (zoom window for writing small), **laser pointer** (a glowing line that fades after
+  about a second, several styles; for presenting / screen recording), **tape** (covers a strip of the
+  page, tap to reveal / hide — for hiding answers when practising), **ruler** (on-screen ruler moved and
+  turned with two fingers, shows its angle in a circle in the middle, pen strokes along it are straight,
+  units follow the page zoom).
+- **Toolbox** dialog: the list of all tools with drag handles to reorder and a "hidden tools" section
+  below — the user chooses which tools sit in the toolbar.
+
+### Other
+- Phone: one tap in the middle of the page hides / shows the toolbar (reading mode).
+- Highlighter: the eraser removes highlighter strokes first, then ink under them.
+
+### Round 3 build plan (proposed order)
+1. Text tool: tap to type, diagonal drag = text box, formatting strip (style, size ±, colour, B I U,
+   lists, alignment), move / resize / delete, saved with the note.
+2. Sticky note = text box preset with a fill colour + background popover (none / solid / light / stripes).
+3. Insert `+`: image from gallery and camera as a movable / resizable / rotatable object; our own sticker
+   set (simple drawings, no GIF service at first).
+4. Shapes tool in the toolbar: tap opens the shape list (line, arrow, rectangle, ellipse, triangle …)
+   to place a perfect shape directly; corner style chips.
+5. `>` more tools: ruler (most useful for a chemistry student), tape (exam practice), laser pointer.
+6. Toolbox dialog to reorder / hide tools; tap-to-hide toolbar option.
+
 ## Sources
 - https://intercom.help/notability/en-us/articles/16299999-getting-started-with-notability-on-android
 - https://intercom.help/notability/en-us/articles/16300068-customize-your-toolbox
@@ -287,3 +340,4 @@ Order chosen so each step is usable on its own and ships separately:
   - vV9fo-6cFT4 "How to organize notes on Android with Notability"
   - YJNQ54Plnbs "Notability Beginner Guide 2026"
   - PgkbJ6Y41Ro "How to Customize and Hide Tools in Notability"
+- Round 3 videos (2026-11-28): mUyzQaxaEvE, YQIVLVWuOFU, DGu_1LlPhM4, 7iTtWkYrpJQ, mnSwh6rOLm8.
