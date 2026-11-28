@@ -215,7 +215,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         (fingerDraws && toolType == MotionEvent.TOOL_TYPE_FINGER)
 
     private fun brush(): Brush = when (tool) {
-        Tool.HIGHLIGHTER -> Brush.createWithColorIntArgb(Families.highlighter, hlColor, hlSize, 0.1f)
+        Tool.HIGHLIGHTER -> Brush.createWithColorIntArgb(Families.of(Families.hlCode(hlTip, hlAngle, hlStab)), hlColor, hlSize, 0.1f)
         Tool.FOUNTAIN -> Brush.createWithColorIntArgb(Families.of(Families.K_FOUNTAIN), penColor, penSize, 0.05f)
         Tool.PENCIL -> Brush.createWithColorIntArgb(Families.of(Families.K_PENCIL), penColor, penSize, 0.05f)
         else -> {
@@ -231,6 +231,13 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     var penEffect = PenEffect.NONE
     /** 0..10 = stabilization 0.0..1.0 (input smoothing). */
     var stabilization = 0
+
+    // Highlighter style (the highlighter's style popover).
+    var hlTip = HlTip.SLANTED
+    /** Slant of the SLANTED tip, −60..60 degrees. */
+    var hlAngle = Families.HL_DEFAULT_ANGLE
+    /** 0..10, like the pen's stabilization. */
+    var hlStab = 0
 
     // ---- eyedropper: the next touch on the page reports the colour of the ink under it ----
     /** Called with the colour under the touch, or null when the touch hit no ink. */
@@ -1279,7 +1286,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
 
     private fun kindOf(st: Stroke) = when {
         shapes[st] != null -> SelKind.SHAPE
-        st.brush.family == Families.highlighter -> SelKind.HIGHLIGHTER
+        Families.isHighlighter(st.brush.family) -> SelKind.HIGHLIGHTER
         else -> SelKind.HANDWRITING
     }
     private fun kindOf(it: PageItem) = if (it.type == ItemType.NOTE) SelKind.NOTE else SelKind.PICTURE
@@ -1499,7 +1506,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
 
     /** Recolours the selection; highlighter strokes keep their transparency. */
     fun recolorSelection(color: Int) = replaceSelection({ st ->
-        val c = if (st.brush.family == Families.highlighter) (HL_ALPHA shl 24) or (color and 0xFFFFFF) else color
+        val c = if (Families.isHighlighter(st.brush.family)) (HL_ALPHA shl 24) or (color and 0xFFFFFF) else color
         transformed(st, 0f, 0f, 1f, 0f, 0f, c)
     })
 

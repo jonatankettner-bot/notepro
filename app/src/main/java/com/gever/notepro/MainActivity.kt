@@ -394,6 +394,9 @@ class MainActivity : Activity() {
         canvas.penType = runCatching { PenType.valueOf(prefs.str("pen.type", "PRESSURE")) }.getOrDefault(PenType.PRESSURE)
         canvas.penEffect = runCatching { PenEffect.valueOf(prefs.str("pen.effect", "NONE")) }.getOrDefault(PenEffect.NONE)
         canvas.stabilization = prefs.int("pen.stab", 0).coerceIn(0, 10)
+        canvas.hlTip = runCatching { HlTip.valueOf(prefs.str("hl.tip", "SLANTED")) }.getOrDefault(HlTip.SLANTED)
+        canvas.hlAngle = prefs.int("hl.angle", Families.HL_DEFAULT_ANGLE).coerceIn(-60, 60)
+        canvas.hlStab = prefs.int("hl.stab", 0).coerceIn(0, 10)
         canvas.tool = runCatching { Tool.valueOf(prefs.str("tool", "PEN")) }.getOrDefault(Tool.PEN)
         prefs.str("lasso.kinds", "").takeIf { it.isNotEmpty() }?.let { s ->
             canvas.lassoKinds.clear()
@@ -541,6 +544,7 @@ class MainActivity : Activity() {
                     optionsRow.addView(dot, LinearLayout.LayoutParams(dp(42), dp(48)))
                 }
                 if (canvas.tool == Tool.PEN) { optionsRow.addView(vDivider()); optionsRow.addView(styleButton()) }
+                if (canvas.tool == Tool.HIGHLIGHTER) { optionsRow.addView(vDivider()); optionsRow.addView(hlStyleButton()) }
             }
         }
     }
@@ -595,6 +599,28 @@ class MainActivity : Activity() {
                 onEffect = { e -> canvas.penEffect = e; prefs.putStr("pen.effect", e.name); updateStylePreview() },
                 onStab = { s -> canvas.stabilization = s; prefs.putInt("pen.stab", s) },
             ).show(b)
+        }
+        b.layoutParams = LinearLayout.LayoutParams(-2, dp(38)).apply { marginStart = dp(6); marginEnd = dp(4) }
+        return b
+    }
+
+    /** The "~ ⌄" button of the highlighter: shows the current tip, opens the highlighter style popover. */
+    private fun hlStyleButton(): View {
+        val b = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            background = pressable(this@MainActivity, 18f, 0xFFF1F3F6.toInt()); setPadding(dp(10), 0, dp(6), 0)
+            contentDescription = "סגנון המרקר"
+        }
+        val prev = HlTipPreview(this, canvas.hlTip, canvas.hlAngle, hlInk.color, bandDp = 7f)
+        b.addView(prev, LinearLayout.LayoutParams(dp(46), dp(30)))
+        b.addView(android.widget.ImageView(this).apply { setImageResource(R.drawable.ic_expand_more); imageTintList = ColorStateList.valueOf(SUB) },
+            LinearLayout.LayoutParams(dp(18), dp(18)).apply { marginStart = dp(2) })
+        b.setOnClickListener {
+            HlStylePopover(this, canvas.hlTip, canvas.hlAngle, canvas.hlStab, hlInk.color) { tip, angle, stab ->
+                canvas.hlTip = tip; canvas.hlAngle = angle; canvas.hlStab = stab
+                prefs.putStr("hl.tip", tip.name); prefs.putInt("hl.angle", angle); prefs.putInt("hl.stab", stab)
+                prev.tip = tip; prev.angle = angle; prev.invalidate()
+            }.show(b)
         }
         b.layoutParams = LinearLayout.LayoutParams(-2, dp(38)).apply { marginStart = dp(6); marginEnd = dp(4) }
         return b

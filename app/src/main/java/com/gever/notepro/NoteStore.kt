@@ -153,11 +153,11 @@ class NoteStore(ctx: Context) {
     }
 
     private fun writeStrokes(out: DataOutputStream, strokes: List<Stroke>) {
-        out.writeInt(MAGIC); out.writeInt(1); out.writeInt(strokes.size)
+        out.writeInt(MAGIC); out.writeInt(2); out.writeInt(strokes.size)
         val p = StrokeInput()
         for (st in strokes) {
             val b = st.brush
-            out.writeByte(Families.code(b)); out.writeInt(b.colorIntArgb); out.writeFloat(b.size); out.writeFloat(b.epsilon)
+            out.writeInt(Families.code(b)); out.writeInt(b.colorIntArgb); out.writeFloat(b.size); out.writeFloat(b.epsilon)
             val inputs = st.inputs
             out.writeInt(inputs.size)
             for (i in 0 until inputs.size) {
@@ -170,12 +170,12 @@ class NoteStore(ctx: Context) {
 
     private fun readStrokes(inp: DataInputStream): List<Stroke> {
         if (inp.readInt() != MAGIC) return emptyList()
-        inp.readInt() // version
+        val version = inp.readInt()
         val count = inp.readInt()
         val list = ArrayList<Stroke>(count)
         val p = StrokeInput()
         repeat(count) {
-            val fam = Families.of(inp.readByte().toInt())
+            val fam = Families.of(if (version >= 2) inp.readInt() else inp.readByte().toInt() and 0xFF)
             val color = inp.readInt(); val size = inp.readFloat(); val eps = inp.readFloat()
             val n = inp.readInt()
             val batch = MutableStrokeInputBatch()
