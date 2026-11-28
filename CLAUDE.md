@@ -94,7 +94,7 @@ drive it with `adb shell input tap/stylus swipe`, and check screens with `adb ex
   `SlidingWindowModel`. Codes 0..3 are the old ones, so old notes load unchanged.
   Highlighter tips (owner's spec, 2026-11-28; `HlTip`, `Families.hlCode`): slanted thin nib with an angle
   −60°..+60° (positive = top leans right; the stock highlighter = −30° and keeps kind 2), straight band
-  with square ends, band with round ends — all built from the stock highlighter's coat so they keep its
+  with square ends, band with round ends, dashes (turn with the line), round dots — all built from the stock highlighter's coat so they keep its
   see-through overlap. Since then ink.bin is v2: the brush code is an int (v1 = one byte, still read).
 - `HlStyle.kt` — the highlighter's style popover (tip cards, slant slider, stabilization) and
   `HlTipPreview`; opened from the "~ ⌄" button in the highlighter's options row.

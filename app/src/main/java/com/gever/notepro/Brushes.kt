@@ -19,8 +19,11 @@ enum class PenType { PRESSURE, MARKER, DASHED, DOTTED }
 /** Optional effect on top of the line type. */
 enum class PenEffect { NONE, RAINBOW, GLITTER }
 
-/** Highlighter tips: slanted flat nib (angle −60°..+60°), straight band with square ends, band with round ends. */
-enum class HlTip { SLANTED, STRAIGHT, ROUND }
+/**
+ * Highlighter tips: slanted flat nib (angle −60°..+60°), straight band with square ends, band with round ends,
+ * dashes along the stroke, round dots.
+ */
+enum class HlTip { SLANTED, STRAIGHT, ROUND, DASHED, DOTTED }
 
 /**
  * All brush families NotePro draws with, and the one-byte code each stroke stores in ink.bin.
@@ -29,8 +32,8 @@ enum class HlTip { SLANTED, STRAIGHT, ROUND }
  * Kinds: 0 pen (pressure), 1 marker (fixed width), 2 highlighter, 3 dashed, 4 dotted, 5 fountain pen,
  * 6 pencil, 7..10 rainbow + (pressure, fixed, dashed, dotted), 11..14 glitter + the same four.
  * Codes 0..3 are what older files contain, so they load unchanged.
- * Kind 15 = highlighter with a chosen tip; bits 8..9 = HlTip, bits 10..14 = slant (−60°..+60° in 5° steps).
- * The default highlighter (slanted 30°) keeps kind 2 = the library's stock highlighter.
+ * Kind 15 = highlighter with a chosen tip; bits 8..10 = HlTip, bits 11..15 = slant (−60°..+60° in 5° steps).
+ * The default highlighter (slanted −30°) keeps kind 2 = the library's stock highlighter.
  * ink.bin v2 stores the code as an int (v1 had one byte).
  */
 object Families {
@@ -62,7 +65,7 @@ object Families {
 
     /** Family for a stored code. Built once and cached; an unknown or unbuildable code falls back to the pen. */
     fun of(code: Int): BrushFamily {
-        val c = code and 0x7FFF
+        val c = code and 0xFFFF
         cache[c]?.let { return it }
         val built = runCatching { build(c) }.getOrNull()
         if (built == null) { cache[c] = pen; return pen }
@@ -90,12 +93,21 @@ object Families {
         val s = stab.coerceIn(0, 10) shl 4
         val a = Math.round(angle.coerceIn(-60, 60) / 5f) * 5
         if (tip == HlTip.SLANTED && a == HL_DEFAULT_ANGLE) return K_HIGHLIGHTER or s
-        return K_HL_TIP or s or (tip.ordinal shl 8) or (((a + 60) / 5) shl 10)
+        val ang = if (tip == HlTip.SLANTED) a else 0        // the slant only matters for the slanted nib
+        return K_HL_TIP or s or (tip.ordinal shl 8) or (((ang + 60) / 5) shl 11)
     }
 
     /** The stock highlighter with a different nib (keeps its paint, soft ends and see-through overlap). */
     private fun highlighterTip(tip: HlTip, angle: Int): BrushFamily {
         val coat = highlighter.coats[0]
+        if (tip == HlTip.DASHED || tip == HlTip.DOTTED) {
+            // Separate marks ("particles") with gaps; dashes turn with the stroke like the library's dashed line.
+            val t = if (tip == HlTip.DASHED)
+                dashed.coats[0].tip.toBuilder().setScaleX(1.3f).setScaleY(0.62f).setCornerRounding(0.25f).setParticleGapDistanceScale(1.6f).build()
+            else
+                BrushTip.builder().setScaleX(0.62f).setScaleY(0.62f).setCornerRounding(1f).setParticleGapDistanceScale(1.0f).build()
+            return highlighter.toBuilder().setCoats(listOf(coat.toBuilder().setTip(t).build())).build()
+        }
         val keep = coat.tip.behaviors.filter { b ->
             tip == HlTip.SLANTED || b.terminalNodes.none { n -> n is BrushBehavior.TargetNode && n.target == BrushBehavior.Target.CORNER_ROUNDING_OFFSET }
         }
@@ -103,7 +115,7 @@ object Families {
             // a thin nib: 0° stands upright, positive angles lean its top to the right (checked on screen)
             HlTip.SLANTED -> coat.tip.toBuilder().setRotationDegrees((((angle % 180) + 180) % 180).toFloat())
             HlTip.STRAIGHT -> coat.tip.toBuilder().setScaleX(0.7f).setScaleY(0.7f).setCornerRounding(0f).setRotationDegrees(0f)
-            HlTip.ROUND -> coat.tip.toBuilder().setScaleX(0.7f).setScaleY(0.7f).setCornerRounding(1f).setRotationDegrees(0f)
+            else -> coat.tip.toBuilder().setScaleX(0.7f).setScaleY(0.7f).setCornerRounding(1f).setRotationDegrees(0f)
         }.setBehaviors(keep).build()
         return highlighter.toBuilder().setCoats(listOf(coat.toBuilder().setTip(t).build())).build()
     }
@@ -125,7 +137,7 @@ object Families {
             K_PENCIL -> pencil()
             in 7..10 -> rainbow(of(TYPE_KINDS[kind - 7]))
             in 11..14 -> glitter(of(TYPE_KINDS[kind - 11]))
-            K_HL_TIP -> highlighterTip(HlTip.values().getOrElse((code shr 8) and 3) { HlTip.SLANTED }, ((code shr 10) and 31) * 5 - 60)
+            K_HL_TIP -> highlighterTip(HlTip.values().getOrElse((code shr 8) and 7) { HlTip.SLANTED }, ((code shr 11) and 31) * 5 - 60)
             else -> pen
         }
         // Stabilization = the library's sliding-window input smoothing; stronger = longer window.

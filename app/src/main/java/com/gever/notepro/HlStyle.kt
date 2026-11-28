@@ -42,6 +42,18 @@ class HlTipPreview(ctx: Context, var tip: HlTip, var angle: Int, var inkColor: I
         } else { path.moveTo(w * 0.3f, h * 0.5f); path.lineTo(w * 0.7f, h * 0.5f) }
         p.color = (inkColor and 0xFFFFFF) or (0x88 shl 24)
         val s = minOf(bandDp * d, h * 0.8f)
+        if (tip == HlTip.DASHED || tip == HlTip.DOTTED) {   // separate marks along the path
+            if (tip == HlTip.DASHED) {
+                p.style = Paint.Style.STROKE; p.strokeWidth = s * 0.62f; p.strokeCap = Paint.Cap.BUTT
+                p.pathEffect = android.graphics.DashPathEffect(floatArrayOf(s * 1.3f, s * 1.0f), 0f)
+                c.drawPath(path, p)
+                p.pathEffect = null; p.style = Paint.Style.FILL
+            } else {
+                val pm = PathMeasure(path, false); var t = 0f
+                while (t <= pm.length) { pm.getPosTan(t, pos, null); c.drawCircle(pos[0], pos[1], s * 0.31f, p); t += s * 0.95f }
+            }
+            return
+        }
         // Union of nib stamps along the path, filled once so the overlap does not darken.
         band.reset()
         val pm = PathMeasure(path, false); val len = pm.length
@@ -56,7 +68,7 @@ class HlTipPreview(ctx: Context, var tip: HlTip, var angle: Int, var inkColor: I
                     rot.setRotate(angle.toFloat(), pos[0], pos[1]); tmp.transform(rot)   // positive = top leans right
                 }
                 HlTip.STRAIGHT -> { nib.set(pos[0] - s * 0.35f, pos[1] - s * 0.35f, pos[0] + s * 0.35f, pos[1] + s * 0.35f); tmp.addRect(nib, Path.Direction.CW) }
-                HlTip.ROUND -> tmp.addCircle(pos[0], pos[1], s * 0.35f, Path.Direction.CW)
+                else -> tmp.addCircle(pos[0], pos[1], s * 0.35f, Path.Direction.CW)
             }
             band.op(tmp, Path.Op.UNION)
             t += 1.5f * d
@@ -98,9 +110,12 @@ class HlStylePopover(
             }
             angleBox.alpha = if (tip == HlTip.SLANTED) 1f else 0.4f
         }
-        val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        val rows = listOf(LinearLayout(ctx), LinearLayout(ctx))
         var slantedPreview: HlTipPreview? = null
-        for ((t, label) in listOf(HlTip.SLANTED to "מוטה", HlTip.STRAIGHT to "ישר", HlTip.ROUND to "מעוגל")) {
+        val tips = listOf(HlTip.SLANTED to "מוטה", HlTip.STRAIGHT to "ישר", HlTip.ROUND to "מעוגל", HlTip.DASHED to "מקווקו", HlTip.DOTTED to "מנוקד")
+        for ((i, pair) in tips.withIndex()) {
+            val (t, label) = pair
+            val row = rows[if (i < 3) 0 else 1]
             val pv = HlTipPreview(ctx, t, angle, inkColor)
             if (t == HlTip.SLANTED) slantedPreview = pv
             val card = LinearLayout(ctx).apply {
@@ -112,7 +127,7 @@ class HlStylePopover(
             cards += t to card
             row.addView(card, LinearLayout.LayoutParams(ctx.hdp(100), -2).apply { setMargins(ctx.hdp(4), ctx.hdp(4), ctx.hdp(4), ctx.hdp(4)) })
         }
-        col.addView(row)
+        for (r in rows) col.addView(r)
 
         // ---- slant angle (slanted tip) ----
         val angValue = valueView()
