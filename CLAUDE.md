@@ -103,6 +103,14 @@ drive it with `adb shell input tap/stylus swipe`, and check screens with `adb ex
   edges / centres and the page centre, level / upright / 45° / parallel lines (pink dashed guides).
   Shapes are saved in notes/<id>/shapes.json keyed by stroke index. Shape strokes use
   `Families.exact()` (no input smoothing — it bent the start of perfect circles).
+- `Items.kt` — page items under the ink: pictures (gallery / camera, copied into notes/<id>/media/,
+  ≤2048 px, EXIF-upright), stickers (emoji in 4 topics, drawn as bitmaps) and sticky notes (coloured card
+  with text). Saved in notes/<id>/items.json. On the canvas (NoteCanvasView "page items"): a finger tap
+  selects, then drag to move, corners to resize (notes: free w/h; others keep aspect), the ↻ handle to rotate
+  (snaps to 15°); the lasso pen picks items up directly. Floating menu in MainActivity (edit / colour for
+  notes, duplicate, delete). Every change is one `Act.Items` undo step. New items go to a free spot that is
+  on screen (`freeSpot`), and the view scrolls to anything placed off screen (`bringIntoView`).
+  The shapes tool button (MainActivity `shapesPopover`) places ready perfect shapes with the pen's settings.
 - `Ui.kt` — shared UI: `showMenu` (our own RTL popup menu; use it instead of PopupMenu, which lays out
   left-to-right on an English-language device), `pressable` ripple background, `Switch.accent()`,
   `AspectImageView`, `relativeDate`.
@@ -117,7 +125,7 @@ drive it with `adb shell input tap/stylus swipe`, and check screens with `adb ex
 - `LibraryActivity.kt` — launcher/home: sidebar (All / Recent / Favourites / Unfiled, nested folders with
   colour or emoji, long-press menu), note-card grid with thumbnails and `⋮` menu, search, "+ הערה חדשה".
 - `NoteStore.kt` — local storage in filesDir: library.json (folders), notes/<id>/meta.json, ink.bin (own
-  binary stroke format), thumb.png. `Families` holds the brush-family singletons used to tag strokes.
+  binary stroke format), thumb.png, shapes.json, items.json, media/. Brush families live in Brushes.kt.
 - Icons: own simple stroke drawings (ic_notes, ic_recent, ic_star, ic_inbox, ic_tune, ic_search, ic_add,
   ic_folder, ic_expand_more, ic_pages, ic_lasso, ic_more_vert) plus a few Material Symbols. App icon:
   adaptive `mipmap-anydpi-v26/ic_launcher.xml` (blue background, tilted ruled page, highlighter stripe,
