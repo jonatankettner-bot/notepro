@@ -114,6 +114,18 @@ class NoteStore(ctx: Context) {
         if (!tmp.renameTo(f)) { f.delete(); tmp.renameTo(f) }
     }
 
+    /** Pictures, stickers and sticky notes on the note's pages (JSON). */
+    fun loadItems(id: String): String? = File(File(notesDir, id), "items.json").takeIf { it.exists() }?.readText()
+
+    fun saveItems(id: String, json: String) {
+        val f = File(File(notesDir, id).apply { mkdirs() }, "items.json")
+        val tmp = File(f.path + ".tmp"); tmp.writeText(json)
+        if (!tmp.renameTo(f)) { f.delete(); tmp.renameTo(f) }
+    }
+
+    /** Folder of the note's inserted pictures. */
+    fun mediaDir(id: String): File = File(File(notesDir, id), "media").apply { mkdirs() }
+
     fun thumbnail(id: String): Bitmap? {
         val f = File(File(notesDir, id), "thumb.png")
         return if (f.exists()) BitmapFactory.decodeFile(f.path) else null

@@ -61,7 +61,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
 
     // ---- settings driven by the toolbar ----
     var tool = Tool.PEN
-        set(v) { field = v; exitEdit() }
+        set(v) { field = v; exitEdit(); deselectItem() }
     var penColor = 0xFF1F1F24.toInt()
     var penSize = 4f
     var hlColor = 0x66FFE14D
@@ -105,6 +105,8 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         class Edit(val removed: List<Pair<Stroke, Int>>, val added: List<Stroke>,
                    val pagesBefore: Int = -1, val pagesAfter: Int = -1,
                    val marksBefore: Set<Int>? = null, val marksAfter: Set<Int>? = null) : Act()
+        /** A change to the page items (pictures, stickers, notes): the whole list before and after. */
+        class Items(val before: List<PageItem>, val after: List<PageItem>) : Act()
     }
     private val undoS = ArrayDeque<Act>()
     private val redoS = ArrayDeque<Act>()
@@ -192,6 +194,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         layer.invalidate()
         reportPage()
         if (selection.isNotEmpty() && drag == Drag.NONE) notifySelection()
+        if (selItem != null) notifyItem()
     }
 
     private var lastReported = -1L
@@ -260,6 +263,8 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
             return true
         }
         // A shape showing handles: touches on a handle / its outline edit it; anything else hides them.
+        // Pictures, stickers and notes: drag the selected one; the selection tool picks them up.
+        if (penPointer == -1 && !gesturing && handleItemTouch(e)) return true
         if ((editShape != null || dragStroke != null) && penPointer == -1 && handleEditTouch(e)) return true
         if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
             val idx = e.actionIndex
@@ -286,7 +291,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                 gesturing = false
                 if (action == MotionEvent.ACTION_UP && !tapMoved && e.eventTime - tapStart < 350) {
-                    if (tapMaxPointers == 1) selectShapeAt(tapX, tapY)          // tap a shape = show its handles
+                    if (tapMaxPointers == 1) { if (!selectShapeAt(tapX, tapY)) selectItemAt(tapX, tapY) }          // tap a shape = show its handles
                     else if (tapGestures && tapMaxPointers == 2) undo() else if (tapGestures && tapMaxPointers == 3) redo()
                 }
             }
@@ -522,6 +527,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         val page = RectF(0f, top, PAGE_W, top + PAGE_H)
         c.drawRect(page, Paint().apply { color = paperColor })
         layer.drawPattern(c, page)
+        for (it in items) { val b = it.bounds(); if (b.bottom > page.top && b.top < page.bottom) itemPainter.draw(c, it) }
         for (st in strokes) { val b = boundsOf(st); if (b.bottom > page.top && b.top < page.bottom) layer.renderer.draw(c, st, tm) }
         return bmp
     }
@@ -591,7 +597,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
     }
 
     fun undo() {
-        exitEdit()
+        exitEdit(); deselectItem()
         clearSelection()
         val a = undoS.removeLastOrNull() ?: return
         when (a) {
@@ -603,12 +609,13 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                 a.marksBefore?.let { bookmarks.clear(); bookmarks.addAll(it) }
                 if (a.pagesBefore > 0) clampAndApply()
             }
+            is Act.Items -> { items.clear(); items.addAll(a.before.map { it.copy() }) }
         }
         redoS.addLast(a); dirty = true; layer.invalidate(); onHistoryChanged?.invoke()
     }
 
     fun redo() {
-        exitEdit()
+        exitEdit(); deselectItem()
         clearSelection()
         val a = redoS.removeLastOrNull() ?: return
         when (a) {
@@ -620,6 +627,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                 a.marksAfter?.let { bookmarks.clear(); bookmarks.addAll(it) }
                 if (a.pagesAfter > 0) clampAndApply()
             }
+            is Act.Items -> { items.clear(); items.addAll(a.after.map { it.copy() }) }
         }
         undoS.addLast(a); dirty = true; layer.invalidate(); onHistoryChanged?.invoke()
     }
@@ -1003,6 +1011,225 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
         }
     }
 
+    // ================= page items: pictures, stickers, sticky notes =================
+    val items = mutableListOf<PageItem>()
+    /** Where this note's pictures are stored (set by the editor). */
+    var mediaDir: java.io.File? = null
+    private val bitmaps = HashMap<String, android.graphics.Bitmap?>()
+    private val itemPainter = ItemPainter { name -> bitmaps.getOrPut(name) { decodeMedia(name) } }
+    /** Selected item and its screen bounds (for the floating menu), or nulls. */
+    var onItemSelected: ((PageItem?, RectF?) -> Unit)? = null
+    var selItem: PageItem? = null; private set
+    private enum class IDrag { NONE, MOVE, CORNER, ROTATE }
+    private var iDrag = IDrag.NONE
+    private var iPointer = -1
+    private var iBefore: List<PageItem>? = null
+    private var iStart: PageItem? = null
+    private var iStartX = 0f; private var iStartY = 0f
+    private var iCorner = 0
+    private var iChanged = false
+
+    private fun decodeMedia(name: String): android.graphics.Bitmap? {
+        val f = java.io.File(mediaDir ?: return null, name)
+        if (!f.exists()) return null
+        val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(f.path, o)
+        var sample = 1; while (maxOf(o.outWidth, o.outHeight) / sample > 1600) sample *= 2
+        return android.graphics.BitmapFactory.decodeFile(f.path, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+    }
+
+    private fun snapshotItems() = items.map { it.copy() }
+
+    /** Records an items change as one undo step. */
+    private fun pushItems(before: List<PageItem>) { push(Act.Items(before, snapshotItems())); notifyItem(); layer.invalidate() }
+
+    /** Centre of what is on screen now (clamped to the pages), for placing new things. */
+    fun visibleCenter(): FloatArray {
+        val p = toWorld(width / 2f, (topInset + height) / 2f)
+        p[0] = p[0].coerceIn(120f, PAGE_W - 120f)
+        return p
+    }
+
+    /**
+     * A free spot near the middle of the screen for something w x h big: tries the centre, then around it,
+     * so a new sticker / note / shape does not land on top of what is already there.
+     */
+    fun freeSpot(w: Float, h: Float): FloatArray {
+        val c = visibleCenter()
+        val sx = w + 40f; val sy = h + 40f
+        val offs = listOf(0f to 0f, 1f to 0f, -1f to 0f, 0f to 1f, 0f to -1f, 1f to 1f, -1f to 1f, 1f to -1f, -1f to -1f, 2f to 0f, -2f to 0f, 0f to 2f)
+        val taken = items.map { it.bounds() } + strokes.map { boundsOf(it) }
+        for ((ox, oy) in offs) {
+            val x = c[0] + ox * sx; val y = c[1] + oy * sy
+            if (x - w / 2 < 10f || x + w / 2 > PAGE_W - 10f) continue
+            val r = RectF(x - w / 2 - 10, y - h / 2 - 10, x + w / 2 + 10, y + h / 2 + 10)
+            if (taken.none { RectF.intersects(it, r) }) return floatArrayOf(x, y)
+        }
+        return c
+    }
+
+    fun addItem(it: PageItem) {
+        exitEdit(); clearSelection()
+        val before = snapshotItems()
+        items.add(it)
+        growPagesForRect(it.bounds())
+        selItem = it
+        pushItems(before)
+    }
+
+    /** Changes the selected item (text, colour ...) as one undo step. */
+    fun changeSelectedItem(f: (PageItem) -> Unit) {
+        val it = selItem ?: return
+        val before = snapshotItems(); f(it); pushItems(before)
+    }
+
+    fun deleteSelectedItem() {
+        val it = selItem ?: return
+        val before = snapshotItems(); items.remove(it); selItem = null; pushItems(before)
+    }
+
+    fun duplicateSelectedItem() {
+        val it = selItem ?: return
+        val before = snapshotItems()
+        val c = it.copy(java.util.UUID.randomUUID().toString()).apply { cx += 30f; cy += 30f }
+        items.add(c); selItem = c; pushItems(before)
+    }
+
+    fun deselectItem() { if (selItem == null) return; endItemDrag(); selItem = null; notifyItem(); layer.invalidate() }
+
+    private fun notifyItem() {
+        val it = selItem
+        if (it == null || iDrag != IDrag.NONE) { onItemSelected?.invoke(null, null); return }
+        val r = it.bounds(); m.mapRect(r); onItemSelected?.invoke(it, r)
+    }
+
+    private fun growPagesForRect(r: RectF) {
+        val last = floor((r.bottom - GAP) / (PAGE_H + GAP)).toInt()
+        if (last + 2 > pages) { pages = last + 2; clampAndApply() }
+    }
+
+    private fun itemAt(sx: Float, sy: Float): PageItem? {
+        val w = toWorld(sx, sy)
+        return items.lastOrNull { it.contains(w[0], w[1]) }
+    }
+
+    private fun rotHandleOf(it: PageItem): FloatArray {
+        val r = it.bounds(); m.mapRect(r); return floatArrayOf(r.centerX(), r.bottom + 34 * d)
+    }
+
+    /** What a touch at (sx, sy) on the selected item does. */
+    private fun itemHit(sx: Float, sy: Float): IDrag {
+        val it = selItem ?: return IDrag.NONE
+        val k = it.corners(); m.mapPoints(k)
+        for (i in 0 until 4) if (kotlin.math.hypot(k[2 * i] - sx, k[2 * i + 1] - sy) < 26 * d) { iCorner = i; return IDrag.CORNER }
+        val r = rotHandleOf(it)
+        if (kotlin.math.hypot(r[0] - sx, r[1] - sy) < 26 * d) return IDrag.ROTATE
+        val w = toWorld(sx, sy)
+        return if (it.contains(w[0], w[1], 10 * u)) IDrag.MOVE else IDrag.NONE
+    }
+
+    /** Touches for items. Returns true when used. */
+    private fun handleItemTouch(e: MotionEvent): Boolean {
+        if (iDrag != IDrag.NONE) {
+            val idx = e.findPointerIndex(iPointer)
+            when (e.actionMasked) {
+                MotionEvent.ACTION_MOVE -> if (idx >= 0) itemMove(e.getX(idx), e.getY(idx))
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> if (e.getPointerId(e.actionIndex) == iPointer) endItemDrag()
+                MotionEvent.ACTION_CANCEL -> endItemDrag()
+            }
+            return true
+        }
+        if (e.actionMasked != MotionEvent.ACTION_DOWN) return false
+        val pen = isPen(e.getToolType(0))
+        // On the selected item: drag a corner, the rotate handle or the item itself (pen or finger).
+        if (selItem != null) {
+            val h = itemHit(e.x, e.y)
+            if (h != IDrag.NONE) { beginItemDrag(h, e); return true }
+            deselectItem()
+        }
+        // With the selection tool the pen picks items up directly.
+        if (pen && tool == Tool.LASSO) {
+            val it = itemAt(e.x, e.y) ?: return false
+            selItem = it; beginItemDrag(IDrag.MOVE, e); return true
+        }
+        return false
+    }
+
+    private fun beginItemDrag(h: IDrag, e: MotionEvent) {
+        val it = selItem ?: return
+        iDrag = h; iPointer = e.getPointerId(0); iBefore = snapshotItems(); iStart = it.copy(); iChanged = false
+        val w = toWorld(e.x, e.y); iStartX = w[0]; iStartY = w[1]
+        notifyItem(); layer.invalidate()
+    }
+
+    private fun itemMove(sx: Float, sy: Float) {
+        val it = selItem ?: return; val st = iStart ?: return
+        val w = toWorld(sx, sy)
+        when (iDrag) {
+            IDrag.MOVE -> { it.cx = st.cx + w[0] - iStartX; it.cy = st.cy + w[1] - iStartY }
+            IDrag.ROTATE -> {
+                var a = kotlin.math.atan2(w[1] - st.cy, w[0] - st.cx) - kotlin.math.atan2(iStartY - st.cy, iStartX - st.cx)
+                var r = st.rot + a
+                val step = (Math.PI / 12).toFloat(); val k = kotlin.math.round(r / step)
+                if (kotlin.math.abs(r - k * step) < 0.05f) r = k * step                 // snap to 15°, so 0° is easy to hit
+                it.rot = r
+            }
+            IDrag.CORNER -> {
+                val l = st.local(w[0], w[1])
+                if (it.type == ItemType.NOTE) {   // notes change width and height freely
+                    it.w = (2 * kotlin.math.abs(l[0])).coerceAtLeast(60f); it.h = (2 * kotlin.math.abs(l[1])).coerceAtLeast(60f)
+                } else {                          // pictures and stickers keep their shape
+                    val k = (kotlin.math.hypot(l[0], l[1]) / kotlin.math.hypot(st.w / 2, st.h / 2)).coerceAtLeast(0.1f)
+                    it.w = st.w * k; it.h = st.h * k
+                }
+            }
+            IDrag.NONE -> return
+        }
+        iChanged = true
+        layer.invalidate()
+    }
+
+    private fun endItemDrag() {
+        if (iDrag == IDrag.NONE) return
+        iDrag = IDrag.NONE
+        val before = iBefore
+        if (iChanged && before != null) { selItem?.let { growPagesForRect(it.bounds()) }; pushItems(before) } else notifyItem()
+        iBefore = null; iStart = null; iPointer = -1
+        layer.invalidate()
+    }
+
+    /** A finger tap on an item selects it. */
+    private fun selectItemAt(sx: Float, sy: Float): Boolean {
+        val it = itemAt(sx, sy) ?: return false
+        exitEdit(); clearSelection(); selItem = it; notifyItem(); layer.invalidate(); return true
+    }
+
+    fun itemsJson(): String = org.json.JSONArray().apply { for (it in items) put(it.toJson()) }.toString()
+
+    fun restoreItems(json: String?) {
+        items.clear(); selItem = null
+        if (json.isNullOrEmpty()) return
+        runCatching { val a = org.json.JSONArray(json); for (k in 0 until a.length()) PageItem.fromJson(a.getJSONObject(k))?.let { items.add(it) } }
+        for (it in items) growPagesForRect(it.bounds())
+        layer.invalidate()
+    }
+
+    // ---------------- shapes tool: place a perfect shape directly ----------------
+    /** Brush of the regular pen with its current settings (used for shapes placed from the shapes tool). */
+    private fun penBrush(): Brush {
+        val type = if (penType == PenType.PRESSURE && !usePressure) PenType.MARKER else penType
+        val color = if (penEffect == PenEffect.RAINBOW) 0xFFE53935.toInt() else penColor
+        return Brush.createWithColorIntArgb(Families.of(Families.penCode(type, penEffect, 0)), color, penSize, 0.05f)
+    }
+
+    /** Adds a ready-made shape (from the shapes tool) and shows its handles. */
+    fun addShape(sh: Shape) {
+        exitEdit(); clearSelection(); deselectItem()
+        val st = strokeOf(sh, if (tool == Tool.HIGHLIGHTER) brush() else penBrush(), 0.6f) ?: return
+        strokes.add(st); shapes[st] = sh.copy(); growPagesFor(listOf(st)); push(Act.Add(st))
+        editStroke = st; editShape = sh; layer.invalidate()
+    }
+
     // ================= lasso selection =================
     var lassoMode = LassoMode.FREEFORM
     /** Selection bounds in SCREEN pixels, or null when nothing is selected. */
@@ -1200,6 +1427,17 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                 c.drawLine(g[0], g[1], g[2], g[3], guidePaint); i += 4
             }
             magnet?.let { val p = it.copyOf(); m.mapPoints(p); c.drawCircle(p[0], p[1], 10 * d, hEdge) }
+            // Selected picture / sticker / note: frame, corner handles, rotate handle.
+            selItem?.let { item ->
+                val k = item.corners(); m.mapPoints(k)
+                tmpPath.reset(); tmpPath.moveTo(k[0], k[1]); tmpPath.lineTo(k[2], k[3]); tmpPath.lineTo(k[4], k[5]); tmpPath.lineTo(k[6], k[7]); tmpPath.close()
+                axisPaint.pathEffect = axisDash; c.drawPath(tmpPath, axisPaint)
+                for (q in 0 until 4) { c.drawCircle(k[2 * q], k[2 * q + 1], 7 * d, hFill); c.drawCircle(k[2 * q], k[2 * q + 1], 7 * d, hEdge) }
+                val r = rotHandleOf(item)
+                c.drawCircle(r[0], r[1], 14 * d, hFill); c.drawCircle(r[0], r[1], 14 * d, rotEdge)
+                val rr = 6 * d
+                tmpPath.reset(); tmpPath.addArc(r[0] - rr, r[1] - rr, r[0] + rr, r[1] + rr, -60f, 290f); c.drawPath(tmpPath, rotIcon)
+            }
             val sh = live ?: editShape ?: return
             // Axes / diagonals: dashed, solid once the shape is perfect (circle, square).
             val ind = screen(sh.indicators())
@@ -1245,6 +1483,7 @@ class NoteCanvasView(ctx: Context) : FrameLayout(ctx) {
                 c.drawRect(page, pagePaint)
                 drawPattern(c, page)
             }
+            for (it in items) { val b = it.bounds(); if (b.bottom >= visTop && b.top <= visBottom) itemPainter.draw(c, it) }   // under the ink, so it can be written on
             val moving = selection.isNotEmpty() && (selDx != 0f || selDy != 0f || selK != 1f)
             for (st in strokes) {
                 val b = boundsOf(st)

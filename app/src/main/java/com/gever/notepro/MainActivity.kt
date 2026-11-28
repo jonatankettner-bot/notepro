@@ -34,6 +34,8 @@ import java.util.Date
 import java.util.Locale
 
 const val EXTRA_NOTE = "note_id"
+private const val REQ_GALLERY = 41
+private const val REQ_CAMERA = 42
 
 /** "הערה · 27 בנוב׳ 2026" */
 fun defaultTitle(): String = "הערה · " + SimpleDateFormat("d בMMM yyyy", Locale.forLanguageTag("he")).format(Date())
@@ -171,6 +173,31 @@ class MainActivity : Activity() {
             }
         }
 
+        // Floating menu above a selected picture / sticker / sticky note.
+        val itemMenu = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; layoutDirection = View.LAYOUT_DIRECTION_RTL
+            background = card(); elevation = 8 * d; setPadding(dp(6), dp(2), dp(6), dp(2)); visibility = View.GONE
+        }
+        root.addView(itemMenu, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.LEFT))
+        canvas.onItemSelected = { item, r ->
+            if (item == null || r == null) itemMenu.visibility = View.GONE
+            else {
+                itemMenu.removeAllViews()
+                if (item.type == ItemType.NOTE) {
+                    itemMenu.addView(selBtn("עריכה") { editNote(item) })
+                    itemMenu.addView(selBtn("צבע") { noteColors(it) })
+                }
+                itemMenu.addView(selBtn("שכפול") { canvas.duplicateSelectedItem() })
+                itemMenu.addView(selBtn("מחיקה") { canvas.deleteSelectedItem() })
+                itemMenu.visibility = View.VISIBLE
+                itemMenu.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+                val w = itemMenu.measuredWidth; val h = itemMenu.measuredHeight
+                itemMenu.translationX = (r.centerX() - w / 2f).coerceIn(dp(8).toFloat(), (root.width - w - dp(8)).toFloat().coerceAtLeast(0f))
+                val above = r.top - h - dp(16)
+                itemMenu.translationY = if (above > dp(140)) above else (r.bottom + dp(60)).coerceAtMost((root.height - h - dp(8)).toFloat())
+            }
+        }
+
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.displayCutout())
             overlay.setPadding(bars.left, bars.top, bars.right, 0)
@@ -188,6 +215,8 @@ class MainActivity : Activity() {
         if (meta.paperColor != -1) canvas.paperColor = meta.paperColor
         canvas.load(store.loadStrokes(meta.id))
         canvas.restoreShapes(store.loadShapes(meta.id))
+        canvas.mediaDir = store.mediaDir(meta.id)
+        canvas.restoreItems(store.loadItems(meta.id))
         canvas.restorePages(meta.pages, meta.bookmarks)
         meta.opened = System.currentTimeMillis(); store.saveMeta(meta)
 
@@ -267,7 +296,10 @@ class MainActivity : Activity() {
         meta.modified = System.currentTimeMillis()
         meta.paper = canvas.paper.name; meta.paperColor = canvas.paperColor
         meta.pages = canvas.pages; meta.bookmarks = canvas.bookmarks.toList()
-        if (canvas.dirty) { store.saveStrokes(meta.id, canvas.strokesSnapshot()); store.saveShapes(meta.id, canvas.shapesJson()) }
+        if (canvas.dirty) {
+            store.saveStrokes(meta.id, canvas.strokesSnapshot()); store.saveShapes(meta.id, canvas.shapesJson())
+            store.saveItems(meta.id, canvas.itemsJson())
+        }
         store.saveMeta(meta)
         store.saveThumbnail(meta.id, canvas.renderThumbnail(360))
         canvas.markSaved(); metaDirty = false
@@ -375,7 +407,7 @@ class MainActivity : Activity() {
                 scaleType = android.widget.ImageView.ScaleType.CENTER
                 background = pressable(this@MainActivity, 12f)
                 imageTintList = ColorStateList.valueOf(ICON)
-                setOnClickListener { onToolButton(b) }
+                setOnClickListener { onToolButton(b, this) }
             }
             b.tool?.let { toolBtns[it] = v }
             tools.addView(v, LinearLayout.LayoutParams(dp(46), dp(46)).apply { marginStart = dp(1); marginEnd = dp(1) })
@@ -393,10 +425,15 @@ class MainActivity : Activity() {
         return box
     }
 
-    private fun onToolButton(b: Btn) {
+    private fun onToolButton(b: Btn, v: View) {
         val t = b.tool
         if (t == null) {
-            Toast.makeText(this, "${b.label}: הכלי הזה עוד לא מוכן, הוא יגיע באחד השלבים הבאים", Toast.LENGTH_SHORT).show()
+            when (b) {
+                Btn.INSERT -> insertMenu(v)
+                Btn.SHAPES -> shapesPopover(v)
+                Btn.STICKY -> addStickyNote()
+                else -> Toast.makeText(this, "${b.label}: הכלי הזה עוד לא מוכן, הוא יגיע באחד השלבים הבאים", Toast.LENGTH_SHORT).show()
+            }
             return
         }
         if (t == canvas.tool) { if (collapsed) { collapsed = false; prefs.toolbarCollapsed = false; refresh() }; return }
@@ -587,6 +624,186 @@ class MainActivity : Activity() {
             val w = 14 * d; val h = 3.5f * d; val cx = width / 2f; val y = height - 6.5f * d
             c.drawRoundRect(cx - w / 2, y, cx + w / 2, y + h, h / 2, h / 2, bar)
             if (Color.luminance(bar.color) > 0.8f) c.drawRoundRect(cx - w / 2, y, cx + w / 2, y + h, h / 2, h / 2, barEdge)
+        }
+    }
+
+    // ================= insert: pictures, stickers, sticky notes, ready shapes =================
+    private var cameraFile: java.io.File? = null
+
+    private fun insertMenu(anchor: View) {
+        showMenu(anchor, listOf(
+            MenuItem("תמונה מהגלריה") { pickImage() },
+            MenuItem("צילום תמונה") { takePhoto() },
+            MenuItem("מדבקה…") { stickerPicker(anchor) },
+            MenuItem("פתק דביק") { addStickyNote() },
+        ), minWidthDp = 200)
+    }
+
+    private fun pickImage() {
+        val i = android.content.Intent(android.content.Intent.ACTION_GET_CONTENT).setType("image/*").addCategory(android.content.Intent.CATEGORY_OPENABLE)
+        runCatching { startActivityForResult(i, REQ_GALLERY) }.onFailure { Toast.makeText(this, "לא נמצאה גלריה", Toast.LENGTH_SHORT).show() }
+    }
+
+    private fun takePhoto() {
+        val f = java.io.File(cacheDir, "camera/shot.jpg").apply { parentFile?.mkdirs(); delete() }
+        cameraFile = f
+        val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.files", f)
+        val i = android.content.Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE)
+            .putExtra(android.provider.MediaStore.EXTRA_OUTPUT, uri)
+            .addFlags(android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION or android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        runCatching { startActivityForResult(i, REQ_CAMERA) }.onFailure { Toast.makeText(this, "לא נמצאה אפליקציית מצלמה", Toast.LENGTH_SHORT).show() }
+    }
+
+    @Deprecated("Activity result API is enough for two simple requests")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode != RESULT_OK) return
+        when (requestCode) {
+            REQ_GALLERY -> data?.data?.let { uri -> importImage { contentResolver.openInputStream(uri) } }
+            REQ_CAMERA -> cameraFile?.takeIf { it.exists() }?.let { f -> importImage { f.inputStream() } }
+        }
+    }
+
+    /** Copies a picture into the note (scaled down to at most 2048 px, turned upright) and places it. */
+    private fun importImage(open: () -> java.io.InputStream?) {
+        val bmp = runCatching {
+            val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            open()?.use { android.graphics.BitmapFactory.decodeStream(it, null, o) }
+            var sample = 1; while (maxOf(o.outWidth, o.outHeight) / sample > 2048) sample *= 2
+            var b = open()?.use { android.graphics.BitmapFactory.decodeStream(it, null, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }) }
+                ?: return@runCatching null
+            val turn = open()?.use { s ->
+                when (android.media.ExifInterface(s).getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 1)) {
+                    6 -> 90f; 3 -> 180f; 8 -> 270f; else -> 0f
+                }
+            } ?: 0f
+            if (turn != 0f) b = android.graphics.Bitmap.createBitmap(b, 0, 0, b.width, b.height, android.graphics.Matrix().apply { postRotate(turn) }, true)
+            b
+        }.getOrNull()
+        if (bmp == null) { Toast.makeText(this, "לא הצלחתי לפתוח את התמונה", Toast.LENGTH_SHORT).show(); return }
+        val png = bmp.hasAlpha()
+        val name = java.util.UUID.randomUUID().toString() + if (png) ".png" else ".jpg"
+        java.io.File(store.mediaDir(meta.id), name).outputStream().use {
+            bmp.compress(if (png) android.graphics.Bitmap.CompressFormat.PNG else android.graphics.Bitmap.CompressFormat.JPEG, 90, it)
+        }
+        val k = minOf(600f / bmp.width, 520f / bmp.height)
+        val c = canvas.freeSpot(bmp.width * k, bmp.height * k)
+        canvas.addItem(PageItem(java.util.UUID.randomUUID().toString(), ItemType.IMAGE, c[0], c[1], bmp.width * k, bmp.height * k, file = name))
+    }
+
+    /** Sticker picker: topic chips and a grid; a tap places the sticker in the middle of the screen. */
+    private fun stickerPicker(anchor: View) {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(TextView(this).apply {
+            text = "מדבקות"; textSize = 17f; setTextColor(INK); typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            textAlignment = View.TEXT_ALIGNMENT_VIEW_START
+        })
+        val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val grid = GridLayout(this).apply { columnCount = 6 }
+        var pw: PopupWindow? = null
+        fun show(cat: Int) {
+            chips.removeAllViews()
+            STICKERS.forEachIndexed { i, (name, _) -> chips.addView(chip(name, i == cat) { show(i) }) }
+            grid.removeAllViews()
+            for (e in STICKERS[cat].second) grid.addView(TextView(this).apply {
+                text = e; textSize = 28f; gravity = Gravity.CENTER; background = pressable(this@MainActivity, 12f)
+                layoutParams = GridLayout.LayoutParams().apply { width = dp(52); height = dp(52) }
+                setOnClickListener {
+                    pw?.dismiss()
+                    val c = canvas.freeSpot(110f, 110f)
+                    canvas.addItem(PageItem(java.util.UUID.randomUUID().toString(), ItemType.STICKER, c[0], c[1], 110f, 110f, sticker = e))
+                }
+            })
+        }
+        show(0)
+        col.addView(chips, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8); bottomMargin = dp(6) })
+        col.addView(grid, LinearLayout.LayoutParams(dp(52 * 6), -2))
+        pw = showPopover(anchor, col)
+    }
+
+    private fun addStickyNote() {
+        val c = canvas.freeSpot(260f, 230f)
+        val note = PageItem(java.util.UUID.randomUUID().toString(), ItemType.NOTE, c[0], c[1], 260f, 230f, color = NOTE_COLORS[0])
+        canvas.addItem(note)
+        editNote(note)
+    }
+
+    /** Text of a sticky note. */
+    private fun editNote(item: PageItem) {
+        val input = android.widget.EditText(this).apply {
+            setText(item.text); setSelection(text.length); textDirection = View.TEXT_DIRECTION_FIRST_STRONG_RTL
+            minLines = 4; gravity = Gravity.TOP or Gravity.START; hint = "כתוב כאן…"
+        }
+        val box = FrameLayout(this).apply { setPadding(dp(20), dp(8), dp(20), 0); addView(input) }
+        android.app.AlertDialog.Builder(this).setTitle("פתק").setView(box)
+            .setPositiveButton("שמירה") { _, _ -> canvas.changeSelectedItem { it.text = input.text.toString() } }
+            .setNegativeButton("ביטול", null).show()
+    }
+
+    private fun noteColors(anchor: View) {
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        var pw: PopupWindow? = null
+        val cur = canvas.selItem?.color
+        for (c in NOTE_COLORS) row.addView(SwatchView(this, c, c == cur, chevron = false, radiusDp = 13f).apply {
+            setOnClickListener { pw?.dismiss(); canvas.changeSelectedItem { it.color = c } }
+        }, LinearLayout.LayoutParams(dp(44), dp(44)))
+        pw = showPopover(anchor, row)
+    }
+
+    /** The shapes tool: a grid of ready perfect shapes; a tap places one with the pen's colour and width. */
+    private fun shapesPopover(anchor: View) {
+        val list: List<Pair<String, (Float, Float) -> Shape>> = listOf(
+            "קו" to { x, y -> LineShape(x - 160, y, x + 160, y) },
+            "ריבוע" to { x, y -> RectShape(x, y, 220f, 220f, 0f) },
+            "מלבן" to { x, y -> RectShape(x, y, 320f, 200f, 0f) },
+            "עיגול" to { x, y -> EllipseShape(x, y, 120f, 120f, 0f) },
+            "אליפסה" to { x, y -> EllipseShape(x, y, 170f, 105f, 0f) },
+            "משולש" to { x, y -> RegularShape(3, x, y + 20, 140f, (-Math.PI / 2).toFloat()) },
+            "ישר זווית" to { x, y -> PolyShape(floatArrayOf(x - 130, y + 100, x + 130, y + 100, x - 130, y - 100), true, "משולש ישר זווית") },
+            "מעוין" to { x, y -> PolyShape(floatArrayOf(x, y - 140, x + 110, y, x, y + 140, x - 110, y), true, "מעוין") },
+            "טרפז" to { x, y -> PolyShape(floatArrayOf(x - 170, y + 90, x + 170, y + 90, x + 100, y - 90, x - 100, y - 90), true, "טרפז שווה שוקיים") },
+            "מקבילית" to { x, y -> PolyShape(floatArrayOf(x - 170, y + 90, x + 110, y + 90, x + 170, y - 90, x - 110, y - 90), true, "מקבילית") },
+            "מחומש" to { x, y -> RegularShape(5, x, y, 140f, (-Math.PI / 2).toFloat()) },
+            "משושה" to { x, y -> RegularShape(6, x, y, 140f, 0f) },
+        )
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        col.addView(TextView(this).apply {
+            text = "צורות"; textSize = 17f; setTextColor(INK); typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            textAlignment = View.TEXT_ALIGNMENT_VIEW_START
+        })
+        col.addView(TextView(this).apply {
+            text = "או: מציירים ועוצרים רגע עם העט"; textSize = 12f; setTextColor(SUB); textAlignment = View.TEXT_ALIGNMENT_VIEW_START
+        })
+        val grid = GridLayout(this).apply { columnCount = 4 }
+        var pw: PopupWindow? = null
+        for ((name, make) in list) grid.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL; background = pressable(this@MainActivity, 14f)
+            setPadding(dp(4), dp(8), dp(4), dp(6))
+            addView(ShapeIcon(make(0f, 0f)), LinearLayout.LayoutParams(dp(56), dp(44)))
+            addView(TextView(this@MainActivity).apply { text = name; textSize = 12f; setTextColor(ICON); gravity = Gravity.CENTER })
+            layoutParams = GridLayout.LayoutParams().apply { width = dp(78) }
+            setOnClickListener {
+                pw?.dismiss()
+                if (canvas.tool != Tool.PEN && canvas.tool != Tool.HIGHLIGHTER) selectTool(Tool.PEN)
+                val b = make(0f, 0f).bounds(); val c = canvas.freeSpot(b.width(), b.height()); canvas.addShape(make(c[0], c[1]))
+            }
+        })
+        col.addView(grid, LinearLayout.LayoutParams(dp(78 * 4), -2).apply { topMargin = dp(8) })
+        pw = showPopover(anchor, col)
+    }
+
+    /** Small outline picture of a shape (fitted into the view). */
+    private inner class ShapeIcon(private val shape: Shape) : View(this@MainActivity) {
+        private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 2f * d; color = ICON; strokeJoin = Paint.Join.ROUND; strokeCap = Paint.Cap.ROUND }
+        private val path = Path()
+        override fun onDraw(c: Canvas) {
+            val o = shape.outline(4f); val b = shape.bounds()
+            val pad = 6 * d
+            val k = minOf((width - 2 * pad) / b.width().coerceAtLeast(1f), (height - 2 * pad) / b.height().coerceAtLeast(1f))
+            val ox = width / 2f - b.centerX() * k; val oy = height / 2f - b.centerY() * k
+            path.reset(); path.moveTo(o[0] * k + ox, o[1] * k + oy)
+            var i = 2; while (i < o.size) { path.lineTo(o[i] * k + ox, o[i + 1] * k + oy); i += 2 }
+            c.drawPath(path, p)
         }
     }
 
